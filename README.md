@@ -215,7 +215,20 @@ python run.py --concurrency 10 --outdir outputs
 
 ## 10. 最新运行结果
 
-> 本节由 `evaluate.py --outdir outputs` 自动生成，将在每次运行后更新。
+> 由 `evaluate.py --outdir outputs` 自动生成（2026-07-30）。
 > 详见 `outputs/EVAL_SUMMARY.md` 与 `outputs/judge_results.json`。
 
-（等待当前运行完成后补充具体 Accuracy / Calibration Error 数据。）
+| 指标 | 数值 |
+|------|------|
+| 已评测题数 | 20 / 20 |
+| Accuracy | **5.0%** |
+| 95% CI 半宽 | ±9.55% |
+| Calibration Error | **91.43%** |
+| 正确题数 | 1 / 20（Q15，答案 A） |
+
+主要观察：
+- 模型在绝大多数题目上过度自信（平均置信度约 90%，实际正确率 5%）。
+- 失败原因集中在：长推理截断（Q1、Q3）、多选题判断错误、数值/公式计算错误。
+- 详细分析见 `TEST_REPORT.md`。
+
+> ⚠️ 当前 `gold_answers.json` 中部分条目来源存疑，建议用新知识库第 5 节答案交叉核对后重建 gold。

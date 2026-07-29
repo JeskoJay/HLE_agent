@@ -94,8 +94,16 @@ Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Ou
   - RAG top-k：4
   - 真实并发上限：10
   - 分支：systematic / intuitive / code_first
-- **运行中**：`wDUa0x` 正在以 top4 + 无 README 污染的配置干净重跑全部 20 题。
-- **待产出**：`outputs/EVAL_SUMMARY.md`、`outputs/judge_results.json`、`TEST_REPORT.md`。
+- **最新运行结果**（2026-07-30）：
+  - Accuracy：**5.0%**（1/20 正确）
+  - Calibration Error：**91.43%**
+  - 唯一正确：Q15（67367227，答案 A）
+- **已产出**：
+  - `outputs/EVAL_SUMMARY.md`
+  - `outputs/judge_results.json`
+  - `README.md`
+  - `TEST_REPORT.md`
+  - `WORKFLOW_REPORT.md`
 
 ---
 

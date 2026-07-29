@@ -163,7 +163,9 @@ def calib_err(confidence, correct, p="2", beta=100):
     confidence = confidence[idxs]
     correct = correct[idxs]
 
-    # beta 是目标桶大小；若样本少于 beta，则只有一桶
+    # beta 是目标桶大小；当样本数不足 beta 时只有一桶。
+    # 官方脚本面向大规模数据集，len(bins)-1 循环在 n<beta 时会空转，
+    # 因此这里显式处理单桶情况，确保小样本也能得到有效指标。
     n = len(confidence)
     if n == 0:
         return 0.0
@@ -172,26 +174,38 @@ def calib_err(confidence, correct, p="2", beta=100):
     bins[-1] = [bins[-1][0], n]
 
     cerr = 0.0
-    for i in range(len(bins) - 1):
-        lo, hi = bins[i]
-        if hi > n:
-            hi = n
-        if lo >= hi:
-            continue
-        bin_conf = confidence[lo:hi]
-        bin_corr = correct[lo:hi]
-        num_examples = len(bin_conf)
-        if num_examples == 0:
-            continue
-        diff = abs(np.nanmean(bin_conf) - np.nanmean(bin_corr))
+    if num_bins == 1:
+        # 单桶：全量计算平均置信度与平均正确率的差异
+        diff = abs(np.nanmean(confidence) - np.nanmean(correct))
         if p == "2":
-            cerr += num_examples / n * (diff ** 2)
+            cerr = diff
         elif p == "1":
-            cerr += num_examples / n * diff
+            cerr = diff
         elif p in ("infty", "infinity", "max"):
-            cerr = max(cerr, diff)
+            cerr = diff
         else:
             raise ValueError("p must be '1', '2', or 'infty'")
+    else:
+        for i in range(len(bins) - 1):
+            lo, hi = bins[i]
+            if hi > n:
+                hi = n
+            if lo >= hi:
+                continue
+            bin_conf = confidence[lo:hi]
+            bin_corr = correct[lo:hi]
+            num_examples = len(bin_conf)
+            if num_examples == 0:
+                continue
+            diff = abs(np.nanmean(bin_conf) - np.nanmean(bin_corr))
+            if p == "2":
+                cerr += num_examples / n * (diff ** 2)
+            elif p == "1":
+                cerr += num_examples / n * diff
+            elif p in ("infty", "infinity", "max"):
+                cerr = max(cerr, diff)
+            else:
+                raise ValueError("p must be '1', '2', or 'infty'")
 
     if p == "2":
         cerr = math.sqrt(cerr)

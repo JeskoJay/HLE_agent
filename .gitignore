@@ -21,3 +21,7 @@ venv/
 *.bak
 HLE_text_only_20questions_responses.jsonl
 HLE_solver_report.md
+
+# 监控脚本运行日志
+monitor.log
+EVAL_SUMMARY.md

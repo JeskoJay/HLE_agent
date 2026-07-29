@@ -61,7 +61,7 @@ class Pipeline:
         # 2. RAG
         rag_chunks = []
         if self.retriever:
-            rag_chunks = self.retriever.retrieve(question, k=4)
+            rag_chunks = self.retriever.retrieve(question, k=config.RAG_TOP_K)
         rag_context = _format_rag(rag_chunks)
         if rag_chunks:
             hits = "\n".join(f"  [{i+1}] score={s:.3f} src={src}\n  {t[:200]}"

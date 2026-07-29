@@ -24,21 +24,64 @@ CHUNK_OVERLAP = 100
 SUPPORTED_EXT = {".txt", ".md", ".json"}
 
 
-def _split_chunks(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list:
+def _strip_frontmatter(text: str) -> str:
+    """去掉 YAML 前言（--- ... ---），避免其中的 scope 关键词污染检索。"""
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            return parts[2].lstrip("\n")
+    return text
+
+
+def _split_into_sections(text: str) -> list:
+    """按 markdown 标题（# ~ ######）切分，使每个知识卡片/章节成为独立片段，
+    提升 top-k 检索的语义相关性（避免把一个 K 卡片从中间截断导致命中错误卡片）。"""
+    lines = text.splitlines()
+    sections, cur = [], []
+    for ln in lines:
+        if re.match(r"^#{1,6}\s", ln):
+            if cur:
+                sections.append("\n".join(cur))
+            cur = [ln]
+        else:
+            cur.append(ln)
+    if cur:
+        sections.append("\n".join(cur))
+    return [s.strip() for s in sections if s.strip()]
+
+
+def _fixed_chunk(text: str, size: int, overlap: int) -> list:
     text = text.strip()
     if not text:
         return []
-    chunks = []
+    out = []
     start = 0
     while start < len(text):
         end = start + size
-        chunk = text[start:end]
-        if chunk.strip():
-            chunks.append(chunk.strip())
+        piece = text[start:end]
+        if piece.strip():
+            out.append(piece.strip())
         if end >= len(text):
             break
         start = end - overlap
-    return chunks
+    return out
+
+
+def _split_chunks(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list:
+    text = _strip_frontmatter(text.strip())
+    if not text:
+        return []
+    chunks = []
+    for sec in _split_into_sections(text):
+        if len(sec) <= size:
+            chunks.append(sec)
+            continue
+        # 超长章节：固定窗口切片，并把标题前置以保留上下文与检索关键词
+        heading = sec.splitlines()[0] if sec.startswith("#") else ""
+        body = sec[len(heading):].strip() if heading else sec
+        for sub in _fixed_chunk(body, size, overlap):
+            chunks.append(f"{heading}\n\n{sub}".strip() if heading else sub)
+    return [c for c in chunks if c.strip()]
 
 
 def _tokenize(text: str) -> list:

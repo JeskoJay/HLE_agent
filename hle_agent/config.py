@@ -54,7 +54,8 @@ ARBITER_PARAMS = {"temperature": 0.2, "max_tokens": 8000}
 
 # ---- 流水线开关 ----
 ENABLE_SENTINEL = True         # 域分类
-ENABLE_RAG = True              # RAG 知识检索（知识库待用户提供资料后接入）
+ENABLE_RAG = True              # RAG 知识检索
+RAG_TOP_K = 2                   # 每题检索返回的知识片段数（检索策略：top2）
 ENABLE_TOOLS = True            # 工具调用（Python 沙箱等）
 ENABLE_ARBITER = True          # 多分支仲裁
 SOLVER_BRANCHES = ["systematic", "intuitive", "code_first"]  # 启用的 Solver 分支

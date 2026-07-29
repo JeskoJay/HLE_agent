@@ -6,6 +6,7 @@ import re
 import config
 import api_client
 import solver
+import stream_logger
 
 ARBITER_SYSTEM = """You are the Arbiter for an HLE (Humanity's Last Exam) solving system.
 Several independent solver branches produced candidate answers for the same problem.
@@ -69,8 +70,11 @@ def arbitrate(question: str, domain: str, branches: list, rag_context: str = "")
         {"role": "system", "content": ARBITER_SYSTEM},
         {"role": "user", "content": user},
     ]
+    stream_logger.section("ARBITER", "汇总多分支并仲裁最终答案…")
     result = api_client.chat(messages, temperature=config.ARBITER_PARAMS["temperature"],
-                             max_tokens=config.ARBITER_PARAMS["max_tokens"])
+                             max_tokens=config.ARBITER_PARAMS["max_tokens"],
+                             stream=True,
+                             on_token=lambda kind, t: stream_logger.token(t))
     parsed = solver.parse_response(result["content"], result.get("reasoning_content", ""))
     reason = result["reasoning_content"] or result["content"]
     resp = f"Explanation: {parsed['explanation']}\nAnswer: {parsed['answer']}\nConfidence: {parsed['confidence'] if parsed['confidence'] is not None else 70}%"

@@ -3,6 +3,7 @@ import json
 
 import config
 import api_client
+import stream_logger
 
 DOMAIN_TAXONOMY = [
     "cryptography", "sage_math", "programming_semantics", "machine_learning",
@@ -24,8 +25,11 @@ def classify(question: str) -> str:
         {"role": "user", "content": question[:3000]},
     ]
     try:
+        stream_logger.section("SENTINEL", "域分类中…")
         r = api_client.chat(msgs, temperature=config.SENTINEL_PARAMS["temperature"],
-                            max_tokens=config.SENTINEL_PARAMS["max_tokens"])
+                            max_tokens=config.SENTINEL_PARAMS["max_tokens"],
+                            stream=True,
+                            on_token=lambda kind, t: stream_logger.token(t))
         text = r["content"].strip() or r["reasoning_content"].strip()
         # 提取 JSON
         start = text.find("{")

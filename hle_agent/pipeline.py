@@ -13,6 +13,7 @@ import sentinel
 import solver
 import arbiter
 import rag_retriever
+import stream_logger
 
 
 def _format_rag(chunks) -> str:
@@ -35,13 +36,20 @@ class Pipeline:
         answer_type = q.get("answer_type", "")
 
         # 1. Sentinel
+        stream_logger.section("QUESTION", f"{qid}  (type={answer_type})")
+        stream_logger.block("QUESTION", "题目", question)
         domain = sentinel.classify(question) if config.ENABLE_SENTINEL else "other"
+        stream_logger.block("SENTINEL", "域分类结果", domain)
 
         # 2. RAG
         rag_chunks = []
         if self.retriever:
             rag_chunks = self.retriever.retrieve(question, k=4)
         rag_context = _format_rag(rag_chunks)
+        if rag_chunks:
+            hits = "\n".join(f"  [{i+1}] score={s:.3f} src={src}\n  {t[:200]}"
+                             for i, (t, s, src) in enumerate(rag_chunks))
+            stream_logger.block("RAG", f"检索到 {len(rag_chunks)} 条参考", hits)
 
         # 3. Solver Pool（并行执行各分支以加速）
         branches = self._run_branches(question, domain, rag_context)
@@ -52,6 +60,8 @@ class Pipeline:
         # 5. 组装记录
         rec = dict(q)
         rec["response"] = arb["response"]
+        stream_logger.block("FINAL", f"{qid} 最终答案 (conf={arb.get('final_confidence')}%)",
+                            arb["response"])
         rec["_meta"] = {
             "domain": domain,
             "rag_hits": len(rag_chunks),
@@ -105,6 +115,7 @@ class Pipeline:
                         continue
 
         exporter.init_report(config.REPORT_FILE)
+        stream_logger.init()
         records = []
         total = len(questions)
         for idx, q in enumerate(questions, 1):

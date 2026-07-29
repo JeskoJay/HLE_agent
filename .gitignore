@@ -25,3 +25,6 @@ HLE_solver_report.md
 # 监控脚本运行日志
 monitor.log
 EVAL_SUMMARY.md
+
+# 流式推理日志（实时 token 输出，运行时生成，不入库）
+reasoning_stream.log

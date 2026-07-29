@@ -8,6 +8,7 @@ import re
 import config
 import api_client
 import tools
+import stream_logger
 
 BASE_INSTRUCTION = """You are a world-class expert solving problems from Humanity's Last Exam (HLE).
 Provide a rigorous solution. Your final answer must be concise.
@@ -109,11 +110,14 @@ def solve_branch(branch: str, question: str, domain: str, rag_context: str) -> d
     ]
 
     tool_log = []
+    stream_logger.section("SOLVER", f"[{branch}] 分支开始推理")
+    on_token = lambda kind, t: stream_logger.token(t)
     if config.ENABLE_TOOLS:
         result = api_client.chat_with_tools(
             messages, tools=tools.TOOL_SPECS, tool_executor=tools.exec_tool,
             tool_meta=tools.TOOL_META, temperature=BRANCH_TEMP[branch],
             max_tokens=config.SOLVER_PARAMS["max_tokens"],
+            stream=True, on_token=on_token,
         )
         # 收集工具调用日志
         for m in messages:
@@ -121,10 +125,13 @@ def solve_branch(branch: str, question: str, domain: str, rag_context: str) -> d
                 tool_log.append(f"[{m.get('name','tool')}] -> {m['content'][:200]}")
     else:
         result = api_client.chat(messages, temperature=BRANCH_TEMP[branch],
-                                 max_tokens=config.SOLVER_PARAMS["max_tokens"])
+                                 max_tokens=config.SOLVER_PARAMS["max_tokens"],
+                                 stream=True, on_token=on_token)
 
     parsed = parse_response(result["content"], result.get("reasoning_content", ""))
     parsed["name"] = branch
     parsed["reasoning"] = result.get("reasoning_content", "")
     parsed["tool_log"] = " | ".join(tool_log) if tool_log else ""
+    stream_logger.block("SOLVER", f"[{branch}] 解析结果 → Answer: {parsed.get('answer')!r}  Confidence: {parsed.get('confidence')}",
+                        parsed.get("explanation", ""))
     return parsed

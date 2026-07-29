@@ -40,7 +40,8 @@ def raw_chat(payload: dict, timeout: int = None) -> dict:
 
 
 def chat(messages, tools=None, tool_choice="auto",
-         temperature=0.3, max_tokens=4000, timeout=None) -> dict:
+         temperature=0.3, max_tokens=4000, timeout=None,
+         stream=False, on_token=None) -> dict:
     """
     高层封装：发送一次对话，返回结构化结果。
     {
@@ -52,6 +53,10 @@ def chat(messages, tools=None, tool_choice="auto",
     }
     若推理模型把窗口耗光（finish_reason=length 且 content 为空），自动翻倍
     max_tokens 重试，确保最终答案有空间输出。
+
+    stream=True 时走 SSE 流式：token 逐块返回，并通过 on_token(kind, delta)
+    回调实时传出（kind in {"reasoning","content"}），便于上层做流式日志。
+    返回值结构与非流式完全一致（content/tool_calls 已聚合）。
     """
     payload = {
         "messages": messages,
@@ -65,36 +70,122 @@ def chat(messages, tools=None, tool_choice="auto",
     last_result = None
     for _ in range(3):
         payload["max_tokens"] = attempt_tokens
-        resp = raw_chat(payload, timeout=timeout)
-        choice = resp["choices"][0]
-        msg = choice["message"]
-        result = {
-            "content": msg.get("content") or "",
-            "reasoning_content": msg.get("reasoning_content") or "",
-            "tool_calls": msg.get("tool_calls"),
-            "finish_reason": choice.get("finish_reason"),
-            "raw": resp,
-        }
+        if stream:
+            result = raw_stream_chat(payload, on_token=on_token, timeout=timeout)
+        else:
+            resp = raw_chat(payload, timeout=timeout)
+            choice = resp["choices"][0]
+            msg = choice["message"]
+            result = {
+                "content": msg.get("content") or "",
+                "reasoning_content": msg.get("reasoning_content") or "",
+                "tool_calls": msg.get("tool_calls"),
+                "finish_reason": choice.get("finish_reason"),
+                "raw": resp,
+            }
         last_result = result
         # 推理模型把 reasoning 写满导致 content 为空 -> 翻倍重试
-        if choice.get("finish_reason") == "length" and not (result["content"] or "").strip():
+        if result["finish_reason"] == "length" and not (result["content"] or "").strip():
             attempt_tokens = min(attempt_tokens * 2, 32000)
             continue
         return result
     return last_result
 
 
+def raw_stream_chat(payload: dict, on_token=None, timeout: int = None) -> dict:
+    """
+    SSE 流式请求：解析 data: 块，聚合 reasoning_content / content / tool_calls，
+    并通过 on_token(kind, delta) 实时回调（kind: "reasoning"|"content"）。
+    返回与非流式一致的结构化 dict。
+    """
+    url = config.BASE_URL.rstrip("/") + "/v1/chat/completions"
+    payload = dict(payload)
+    payload["model"] = config.MODEL
+    payload["stream"] = True
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {config.API_KEY}")
+    req.add_header("Accept", "text/event-stream")
+
+    reasoning_acc = ""
+    content_acc = ""
+    tool_calls_acc = {}      # index -> {id, type, function:{name, arguments}}
+    finish_reason = None
+    raw = {}
+
+    with urllib.request.urlopen(req, timeout=timeout or config.REQUEST_TIMEOUT) as resp:
+        for raw_line in resp:
+            line = raw_line.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data_s = line[5:].strip()
+            if data_s == "[DONE]":
+                break
+            try:
+                o = json.loads(data_s)
+            except Exception:
+                continue
+            raw = o
+            choices = o.get("choices") or []
+            if not choices:
+                continue
+            ch = choices[0]
+            if ch.get("finish_reason"):
+                finish_reason = ch["finish_reason"]
+            delta = ch.get("delta", {})
+            # 思考链
+            rc = delta.get("reasoning_content") or ""
+            if rc:
+                reasoning_acc += rc
+                if on_token:
+                    on_token("reasoning", rc)
+            # 最终答案
+            ct = delta.get("content") or ""
+            if ct:
+                content_acc += ct
+                if on_token:
+                    on_token("content", ct)
+            # 工具调用（流式分片，需要按 index 聚合）
+            for tc in (delta.get("tool_calls") or []):
+                idx = tc.get("index", 0)
+                slot = tool_calls_acc.setdefault(
+                    idx, {"id": "", "type": "function",
+                          "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                if tc.get("type"):
+                    slot["type"] = tc["type"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] += fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]
+
+    tool_calls = [v for _, v in sorted(tool_calls_acc.items())] or None
+    return {
+        "content": content_acc,
+        "reasoning_content": reasoning_acc,
+        "tool_calls": tool_calls,
+        "finish_reason": finish_reason,
+        "raw": raw,
+    }
+
+
 def chat_with_tools(messages, tools, tool_executor, tool_meta,
-                    temperature=0.3, max_tokens=4000, max_rounds=6, timeout=None) -> dict:
+                    temperature=0.3, max_tokens=4000, max_rounds=6, timeout=None,
+                    stream=False, on_token=None) -> dict:
     """
     Agent loop：当模型返回 tool_calls 时执行工具，把结果回填，继续对话，
     直到模型给出最终答案（finish_reason != 'tool_calls'）或达到轮数上限。
     tool_executor(name, args) -> str  返回工具执行结果字符串
     返回最后一次的结构化结果。
+    stream/on_token 透传给 chat，实现思考链实时流出。
     """
     for _ in range(max_rounds):
         result = chat(messages, tools=tools, tool_choice="auto",
-                      temperature=temperature, max_tokens=max_tokens, timeout=timeout)
+                      temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+                      stream=stream, on_token=on_token)
         # 将助手消息加入历史
         assistant_msg = {
             "role": "assistant",
@@ -134,5 +225,6 @@ def chat_with_tools(messages, tools, tool_executor, tool_meta,
                 "content": output,
             })
     # 达到轮数上限，强制让模型总结
-    result = chat(messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout)
+    result = chat(messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+                  stream=stream, on_token=on_token)
     return result

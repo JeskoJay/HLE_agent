@@ -16,27 +16,43 @@ class APIError(Exception):
     pass
 
 
+def _open_with_retry(req, timeout=None):
+    """带限流/重试地打开请求连接。
+
+    仅对 429 / 5xx / 网络错误做指数退避重试；4xx（如 400 参数错误）直接抛出，
+    避免对无效请求无意义重试。高并发（多题并行）打 API 时，代理返回 429 不会直接崩。
+    """
+    last_err = None
+    for attempt in range(config.MAX_RETRIES):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout or config.REQUEST_TIMEOUT)
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in (429, 500, 502, 503, 504) and attempt < config.MAX_RETRIES - 1:
+                time.sleep(config.RETRY_BACKOFF * (2 ** attempt))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = e
+            if attempt < config.MAX_RETRIES - 1:
+                time.sleep(config.RETRY_BACKOFF * (2 ** attempt))
+                continue
+            raise APIError(f"API request failed after {config.MAX_RETRIES} attempts: {last_err}")
+    raise APIError(f"API request failed after {config.MAX_RETRIES} attempts: {last_err}")
+
+
 def raw_chat(payload: dict, timeout: int = None) -> dict:
     """底层请求，返回原始 JSON。带指数退避重试。"""
     url = config.BASE_URL.rstrip("/") + "/v1/chat/completions"
     payload = dict(payload)
     payload["model"] = config.MODEL
     data = json.dumps(payload).encode("utf-8")
-    last_err = None
-    for attempt in range(config.MAX_RETRIES):
-        try:
-            req = urllib.request.Request(url, data=data, method="POST")
-            req.add_header("Content-Type", "application/json")
-            req.add_header("Authorization", f"Bearer {config.API_KEY}")
-            req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req, timeout=timeout or config.REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-            last_err = e
-            if attempt < config.MAX_RETRIES - 1:
-                wait = config.RETRY_BACKOFF * (2 ** attempt)
-                time.sleep(wait)
-    raise APIError(f"API request failed after {config.MAX_RETRIES} attempts: {last_err}")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {config.API_KEY}")
+    req.add_header("Accept", "application/json")
+    with _open_with_retry(req, timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def chat(messages, tools=None, tool_choice="auto",
@@ -114,7 +130,7 @@ def raw_stream_chat(payload: dict, on_token=None, timeout: int = None) -> dict:
     finish_reason = None
     raw = {}
 
-    with urllib.request.urlopen(req, timeout=timeout or config.REQUEST_TIMEOUT) as resp:
+    with _open_with_retry(req, timeout) as resp:
         for raw_line in resp:
             line = raw_line.decode("utf-8", "replace").strip()
             if not line or not line.startswith("data:"):

@@ -36,8 +36,8 @@ MODEL = os.getenv("HLE_MODEL", _ENV.get("HLE_MODEL", "deepseek-v4-pro"))
 
 # ---- 调用参数 ----
 REQUEST_TIMEOUT = 180          # 单次请求超时（秒），推理模型较慢
-MAX_RETRIES = 3                # 失败重试次数
-RETRY_BACKOFF = 5              # 重试退避基数（秒）
+MAX_RETRIES = 4                # 失败重试次数（含 429/5xx 限流退避）
+RETRY_BACKOFF = 8              # 重试退避基数（秒），高并发限流时退避更足
 
 # 各角色默认参数
 # 注意：deepseek-v4-pro 是推理模型，reasoning_content 会消耗大量 token，

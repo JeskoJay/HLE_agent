@@ -28,3 +28,9 @@ EVAL_SUMMARY.md
 
 # 流式推理日志（实时 token 输出，运行时生成，不入库）
 reasoning_stream.log
+
+# 运行输出文件夹（每题一个子文件夹 + 汇总，不入库）
+outputs/
+
+# 评测结果
+EVAL_SUMMARY.md

@@ -1,0 +1,23 @@
+# 密钥与本地配置（绝不入库）
+.env
+.env.*
+!.env.example
+
+# 工作区内部状态
+.workbuddy/
+.kh_proxy/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 运行中间产物
+.workbuddy/agent_tmp/
+*.bak
+
+# 运行结果（由流水线生成，不入库；如需共享请取消对应注释）
+*.bak
+HLE_text_only_20questions_responses.jsonl
+HLE_solver_report.md

@@ -52,11 +52,15 @@ _ANS_RE = re.compile(r"Answer\s*:\s*(.+?)(?=\n\s*Confidence\s*:|\Z)", re.S | re.
 _CONF_RE = re.compile(r"Confidence\s*:\s*(\d{1,3})", re.I)
 _EXP_RE = re.compile(r"Explanation\s*:\s*(.+?)(?=\n\s*Answer\s*:)", re.S | re.I)
 
+# 清理 deepseek 推理模型的 DSML 标记（覆盖单/双层 ｜ 变体，如 </｜｜DSML｜｜tool_calls>）。
+# 注意：必须要求标记内含 ｜，否则会误删正常尖括号内容（如 <100>）。
+_DSML_TAG_RE = re.compile(r"<[^>]*｜[^>]*>")
+
 
 def parse_response(content: str, reasoning: str = "") -> dict:
     """从模型输出解析 explanation / answer / confidence。"""
-    # 清理 deepseek 推理模型的内部 DSML 标记
-    content = re.sub(r"</?｜[^｜]+｜>", "", content or "")
+    # 清理 deepseek 推理模型的内部 DSML 标记（含双层 ｜｜ 变体）
+    content = _DSML_TAG_RE.sub("", content or "")
     content = content.strip()
     explanation = ""
     answer = ""
@@ -72,7 +76,7 @@ def parse_response(content: str, reasoning: str = "") -> dict:
         confidence = max(0, min(100, int(m.group(1))))
     # 兜底 1：content 里没有 Answer，但 reasoning 里有
     if not answer and reasoning:
-        r2 = re.sub(r"</?｜[^｜]+｜>", "", reasoning)
+        r2 = _DSML_TAG_RE.sub("", reasoning)
         mr = _ANS_RE.search(r2)
         if mr:
             answer = mr.group(1).strip().strip("`").strip()

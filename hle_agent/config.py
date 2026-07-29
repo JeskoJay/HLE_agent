@@ -39,6 +39,12 @@ REQUEST_TIMEOUT = 180          # 单次请求超时（秒），推理模型较�
 MAX_RETRIES = 4                # 失败重试次数（含 429/5xx 限流退避）
 RETRY_BACKOFF = 8              # 重试退避基数（秒），高并发限流时退避更足
 
+# 全局并发 API 请求上限。题间(20)×分支(3)嵌套并行理论峰值 ~60+ 路同时打 API，
+# 远超代理通常的 RPM/TPM 限制。用信号量把"同时在飞的真实请求"封顶为本值，
+# 线程再多也只是排队重叠 IO，不会把代理打爆导致限流/重试耗尽。可按代理实际
+# 额度上调（如 15~20），不确定时保持 10 最稳。
+MAX_CONCURRENT_REQUESTS = 10
+
 # 各角色默认参数
 # 注意：deepseek-v4-pro 是推理模型，reasoning_content 会消耗大量 token，
 # 必须给足 max_tokens 才能让最终 answer（content）有空间输出。

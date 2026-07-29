@@ -6,6 +6,7 @@ deepseek-v4-pro 客户端封装。
 """
 import json
 import time
+import threading
 import urllib.request
 import urllib.error
 
@@ -14,6 +15,19 @@ import config
 
 class APIError(Exception):
     pass
+
+
+# 全局并发信号量：把"同时在飞的真实 API 请求"封顶为 config.MAX_CONCURRENT_REQUESTS。
+# 题间×分支嵌套线程池可能多达 60+ 路想打 API，信号量让它们排队，仅允许 N 个真正并发，
+# 自动贴合代理额度，避免 429 限流风暴与重试耗尽。信号量在整次请求（含 SSE 流式读取与
+# 重试退避）期间持有，因此也限制了"同时在读的流式连接"数量。
+_req_sem = threading.Semaphore(config.MAX_CONCURRENT_REQUESTS)
+
+
+def _open_throttled(req, timeout=None):
+    """在全局信号量保护下打开请求连接（含重试）。"""
+    with _req_sem:
+        return _open_with_retry(req, timeout)
 
 
 def _open_with_retry(req, timeout=None):
@@ -51,7 +65,7 @@ def raw_chat(payload: dict, timeout: int = None) -> dict:
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", f"Bearer {config.API_KEY}")
     req.add_header("Accept", "application/json")
-    with _open_with_retry(req, timeout) as resp:
+    with _open_throttled(req, timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -130,7 +144,7 @@ def raw_stream_chat(payload: dict, on_token=None, timeout: int = None) -> dict:
     finish_reason = None
     raw = {}
 
-    with _open_with_retry(req, timeout) as resp:
+    with _open_throttled(req, timeout) as resp:
         for raw_line in resp:
             line = raw_line.decode("utf-8", "replace").strip()
             if not line or not line.startswith("data:"):

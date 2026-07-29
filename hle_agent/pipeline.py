@@ -30,21 +30,30 @@ class Pipeline:
     def __init__(self):
         self.retriever = rag_retriever.get_retriever()
 
-    def process_one(self, q: dict, outdir=None) -> dict:
+    def process_one(self, q: dict, outdir=None, qindex=None) -> dict:
         t0 = time.time()
         qid = q["id"]
         question = q["question"]
         answer_type = q.get("answer_type", "")
 
-        # 每题独立的流式日志（并行时不串台）
+        # 每题独立的流式日志（并行时不串台）；文件夹名带题号 NN_<qid> 便于定位
         if outdir:
-            qdir = os.path.join(outdir, qid)
+            folder = f"{qindex:02d}_{qid}" if qindex else qid
+            qdir = os.path.join(outdir, folder)
             os.makedirs(qdir, exist_ok=True)
+            with open(os.path.join(qdir, "meta.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "index": qindex,
+                    "id": qid,
+                    "answer_type": answer_type,
+                    "question": question,
+                }, f, ensure_ascii=False, indent=2)
             logger = stream_logger.StreamLogger(os.path.join(qdir, "reasoning.log"))
             logger.init()
             stream_logger.set_thread_logger(logger)
 
-        stream_logger.section("QUESTION", f"{qid}  (type={answer_type})")
+        qtag = f"Q{qindex} {qid}" if qindex else qid
+        stream_logger.section("QUESTION", f"{qtag}  (type={answer_type})")
         stream_logger.block("QUESTION", "题目", question)
         domain = sentinel.classify(question) if config.ENABLE_SENTINEL else "other"
         stream_logger.block("SENTINEL", "域分类结果", domain)
@@ -84,7 +93,8 @@ class Pipeline:
         }
         # 每题独立产出文件
         if outdir:
-            qdir = os.path.join(outdir, qid)
+            folder = f"{qindex:02d}_{qid}" if qindex else qid
+            qdir = os.path.join(outdir, folder)
             with open(os.path.join(qdir, "response.json"), "w", encoding="utf-8") as f:
                 json.dump(rec, f, ensure_ascii=False, indent=2)
         return rec
@@ -110,7 +120,7 @@ class Pipeline:
     def _safe_one(self, q, idx, total, out_file, rep_file, outdir, rep_lock):
         """单题执行 + 容错，写入报告条目。返回记录。"""
         try:
-            rec = self.process_one(q, outdir=outdir)
+            rec = self.process_one(q, outdir=outdir, qindex=idx)
         except Exception as e:
             rec = dict(q)
             rec["response"] = "Explanation: pipeline error\nAnswer: \nConfidence: 0"

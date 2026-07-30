@@ -131,20 +131,21 @@ Input → Sentinel → Planner 预分析 → 计划驱动 RAG → Solver Pool (3
 
 ## 5. 当前状态
 
-- **代码**：已就绪，待推送 GitHub `main` 分支（本轮一并提交新模块 `multiselect.py` / `verifier.py` 与架构图 `HLE_agent_architecture.svg` / `.html`）。
+- **代码**：已推送 GitHub `main` 分支（v0.9.1 commit `b4936ee`；本轮复测文档更新将再次提交）。
 - **配置**：
   - 模型：`deepseek-v4-pro`
   - 流程：Sentinel → Planner 前置 → 计划驱动 RAG（BM25，top-1，一卡一 chunk）→ 3 分支×自洽采样 → 分歧 Debate → Arbiter → Reflection → 后校验（多选逐判 / 数值复算）→ 置信度压缩
   - 真实并发上限：10
 - **评测基准**：官方 `hle_dataset.json`（20 题 qid 全部精确匹配，gold 以官方 `answer` 为准）
-- **最新运行结果**（2026-07-30，v0.9.1）：
-  - **Accuracy（LLM judge）：45.0%**（9/20 正确，正确题：Q2/Q6/Q8/Q9/Q10/Q11/Q13/Q16/Q20）
-  - **Accuracy（准精确匹配）：35.0%**
-  - **Calibration Error：60.42%**（较 v0.8 的 66.18% 显著改善）
-  - 对比 v0.8（45.0% / 66.18%）：逐题结构变化大——新答对 Q11/Q13/Q20，回退 Q1（运行事故非能力）/Q3/Q12；Q1 若正常完成预计 10/20=50%。
+- **最新运行结果**（2026-07-30，v0.9.1 复测，Q1 由用户重跑修正）：
+  - **Accuracy（LLM judge）：50.0%**（10/20 正确，正确题：Q1/Q2/Q6/Q8/Q9/Q10/Q11/Q13/Q16/Q20）
+  - **Accuracy（准精确匹配）：40.0%**
+  - **Calibration Error：60.21%**（较 v0.8 的 66.18% 显著改善）
+  - 对比 v0.8（45.0% / 66.18%）：新答对 Q1（崩溃修复已验证）/Q11/Q13/Q20，回退 Q3（butterfly vs humanity）/Q12（1.007:0 不稳定）；Q1 重跑后整体达 **10/20 = 50%**。
 - **已产出**：
   - `outputs/EVAL_SUMMARY.md`
   - `outputs/judge_results.json`
+  - `outputs/report.md`（统一推理报告，每题一节）
   - `README.md`
   - `TEST_REPORT.md`
   - `WORKFLOW_REPORT.md`
@@ -154,7 +155,7 @@ Input → Sentinel → Planner 预分析 → 计划驱动 RAG → Solver Pool (3
 
 ## 6. 后续可优化方向
 
-1. **重跑 Q1 验证崩溃修复**：Q1 修复后尚未重跑，预计可达正确，整体 Accuracy 由 45% 升至 50%（10/20）。
+1. ✅ **重跑 Q1 验证崩溃修复（已完成）**：用户重跑 Q1，judge 判正确（95%），整体 Accuracy 达 50%（10/20），确认 Q1 崩溃修复有效。
 2. **多选组合题深度优化**：`multiselect.py` 已落地逐选项判定并修复 Q20，但 Q18/Q19 仍有 3–4 处分歧；需增强选项隐式证据召回（必要时对每个选项单独跑验证代码）。
 3. **更智能的检索**：当前是 BM25（top-1），可升级为 embedding-based dense retrieval（跨语言召回更稳）。
 4. **数值题交叉验证增强**：Q4/Q7/Q14/Q17 仍错（建模/系数错）；可强制多分支用不同方法独立计算，不一致时降置信度并触发二次检索。

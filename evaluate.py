@@ -31,6 +31,12 @@ import loader
 
 GOLD = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "gold_answers.json")))
 
+# judge 输入上限：HLE 官方脚本不截断 response。我们的 response 可能很长
+# （Agent 把全部推理塞在 Answer: 之后，最终答案在末尾），必须让 judge 看到
+# 完整内容才能抽到最终答案。设一个安全上限避免超出模型上下文即可。
+MAX_QUESTION_CHARS = 12000
+MAX_RESPONSE_CHARS = 120000
+
 # 与官方脚本对齐的 judge prompt（强制 JSON 输出）
 JUDGE_PROMPT = """Judge whether the following [response] to [question] is correct or not based on the precise and unambiguous [correct_answer] below.
 
@@ -98,8 +104,8 @@ def judge(question: str, correct_answer: str, response: str, model_answer_hint: 
     若结构化输出失败，则 fallback 到简单二元判断。
     """
     prompt = JUDGE_PROMPT.format(
-        question=question[:2500],
-        response=response[:4000],
+        question=question[:MAX_QUESTION_CHARS],
+        response=response[:MAX_RESPONSE_CHARS],
         correct_answer=correct_answer,
     )
     msgs = [{"role": "user", "content": prompt}]
@@ -263,22 +269,31 @@ def main():
     records = loader.load_questions(resp_path)
     judged = {}
 
-    for rec in records:
+    import concurrent.futures as _futures
+
+    def _judge_one(rec):
         qid = rec.get("id")
         gold = GOLD.get(qid)
         if not gold or not qid:
-            continue
+            return None
         question_text = rec.get("question", "")
         response_text = rec.get("response", "")
         model_answer = _extract_answer(response_text)
-
         jr = judge(question_text, gold, response_text, model_answer_hint=model_answer)
-        judged[qid] = {
+        return qid, {
             "id": qid,
             "question": question_text,
             "response": response_text,
             "judge_response": jr,
         }
+
+    with _futures.ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_REQUESTS) as ex:
+        futures = [ex.submit(_judge_one, rec) for rec in records]
+        for fut in _futures.as_completed(futures):
+            res = fut.result()
+            if res:
+                qid, payload = res
+                judged[qid] = payload
 
     # 指标计算
     n_total = len(records)

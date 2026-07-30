@@ -37,3 +37,6 @@ outputs/
 
 # 评测结果
 EVAL_SUMMARY.md
+
+# 旧 gold 备份（已被官方 hle_dataset.json 取代）
+gold_answers_OLD_unreliable.json

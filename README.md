@@ -216,19 +216,21 @@ python run.py --concurrency 10 --outdir outputs
 ## 10. 最新运行结果
 
 > 由 `evaluate.py --outdir outputs` 自动生成（2026-07-30）。
+> 评测基准：**官方 `hle_dataset.json`**（20 题 qid 全部精确匹配），gold 以官方 `answer` 字段为准。
 > 详见 `outputs/EVAL_SUMMARY.md` 与 `outputs/judge_results.json`。
 
 | 指标 | 数值 |
 |------|------|
 | 已评测题数 | 20 / 20 |
-| Accuracy | **5.0%** |
-| 95% CI 半宽 | ±9.55% |
-| Calibration Error | **91.43%** |
-| 正确题数 | 1 / 20（Q15，答案 A） |
+| **Accuracy** | **40.0%** |
+| 95% CI 半宽 | ±21.47% |
+| **Calibration Error** | **67.53%** |
+| 正确题数 | 8 / 20（Q1, Q2, Q5, Q6, Q8, Q9, Q10, Q16） |
 
 主要观察：
-- 模型在绝大多数题目上过度自信（平均置信度约 90%，实际正确率 5%）。
-- 失败原因集中在：长推理截断（Q1、Q3）、多选题判断错误、数值/公式计算错误。
+- 正确题涵盖密码破译（Q1）、Shamir 恢复（Q2）、数学推导（Q8）、计数（Q16）、以及多道多选题（Q5/Q6/Q9/Q10）。
+- 失败集中在：长推理截断（Q3 唯一无答案）、多选组合题（Q18–Q20）、数值/公式偏差（Q4/Q7/Q11–Q14/Q17）。
+- 模型仍**过度自信**：90–99% 置信度桶实际正确率仅 54.5%。
 - 详细分析见 `TEST_REPORT.md`。
 
-> ⚠️ 当前 `gold_answers.json` 中部分条目来源存疑，建议用新知识库第 5 节答案交叉核对后重建 gold。
+> 说明：早期 5% 结果为双重失真——既用了错误的 `gold_answers.json`，又因 judge 截断 80k response 至 4000 字符而看不到答案。本轮用官方 gold + 修复截断后，40% 才是可信基线。

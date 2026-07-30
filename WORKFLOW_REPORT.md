@@ -82,7 +82,8 @@ Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Ou
 | 检索分块切断 K 卡片 | top2 命中错误题型卡片 | 按 Markdown 章节整体成块 | `rag_retriever.py` |
 | README 污染检索 | 说明文档被当知识检索 | 移出 `knowledge_base/` 到根目录 | `knowledge_base/` |
 | 评分方法与官方不一致 | 指标不可比、confidence 未验证 | 重写 `evaluate.py` 对齐官方 judge prompt 与 calib_err | `evaluate.py` |
-| gold_answers.json 来源存疑 | 7 条答案无法溯源，可能循环自评 | 已识别并标记；建议用新知识库第 5 节答案重建 gold（待用户确认） | `gold_answers.json` |
+| gold_answers.json 答案错误 | 旧 gold 与官方答案对不上（如 Q1/Q2），且 7 条无法溯源、疑似循环自评 | 用官方 `hle_dataset.json` 完整集重建 gold（20 题 qid 精确匹配） | `gold_answers.json` |
+| **judge 截断 response 致误判** | `response[:4000]` 把 80k 字符末尾答案切掉，judge 抽不到答案、系统性判错 | 改为不截断（上限 120k），与官方一致；并给 judge 循环加并发 | `evaluate.py` |
 
 ---
 
@@ -94,10 +95,11 @@ Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Ou
   - RAG top-k：4
   - 真实并发上限：10
   - 分支：systematic / intuitive / code_first
-- **最新运行结果**（2026-07-30）：
-  - Accuracy：**5.0%**（1/20 正确）
-  - Calibration Error：**91.43%**
-  - 唯一正确：Q15（67367227，答案 A）
+- **评测基准**：官方 `hle_dataset.json`（20 题 qid 全部精确匹配，gold 以官方 `answer` 为准）
+- **最新运行结果**（2026-07-30，v0.7）：
+  - **Accuracy：40.0%**（8/20 正确，正确题：Q1/Q2/Q5/Q6/Q8/Q9/Q10/Q16）
+  - **Calibration Error：67.53%**
+  - 早期 5% 为双重失真结果（错误 gold + judge 截断 bug），已修正。
 - **已产出**：
   - `outputs/EVAL_SUMMARY.md`
   - `outputs/judge_results.json`
@@ -109,7 +111,7 @@ Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Ou
 
 ## 6. 后续可优化方向
 
-1. **gold 答案重建**：用新知识库第 5 节给出的 20 题推荐答案替换旧 `gold_answers.json`，消除循环打分隐患。
+1. **长推理截断**：增大 solver `max_tokens`，避免 Q3 这类题无最终答案。
 2. **更智能的检索**：当前是 TF-IDF，可升级为 embedding-based dense retrieval。
 3. **分支结果融合策略**：Arbiter 目前基于置信度简单综合，可引入证据强度加权。
 4. **calibration 优化**：模型普遍过度自信，可在 Arbiter prompt 中加入 calibration 提示。

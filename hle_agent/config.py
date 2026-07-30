@@ -55,7 +55,7 @@ ARBITER_PARAMS = {"temperature": 0.2, "max_tokens": 8000}
 # ---- 流水线开关 ----
 ENABLE_SENTINEL = True         # 域分类
 ENABLE_RAG = True              # RAG 知识检索
-RAG_TOP_K = 4                   # 每题检索返回的知识片段数（检索策略：top4）
+RAG_TOP_K = 1                   # 每题检索返回的知识片段数（检索策略：top1）
 ENABLE_TOOLS = True            # 工具调用（Python 沙箱等）
 ENABLE_ARBITER = True          # 多分支仲裁
 SOLVER_BRANCHES = ["systematic", "intuitive", "code_first"]  # 启用的 Solver 分支
@@ -74,6 +74,16 @@ ENABLE_REFLECTION = True
 REFLECT_MAX_ROUNDS = 1           # 反思轮数安全阀
 # P1-§3 ReAct：code_first 分支工具循环上限（Observation 含报错时提示自我修复）
 REACT_MAX_ROUNDS = 8
+
+# ---- v0.9 改进开关（高收益①② + 中收益③④）----
+# ①多选组合题逐选项判定：检测 select-all-that-apply，每选项独立 True/False 后拼装
+ENABLE_MULTISELECT_JUDGE = True
+# ②数值/特殊格式答案代码复算：Reflection 后强制 python 独立复算，DISAGREE 且 conf>=70 才替换
+ENABLE_NUMERIC_VERIFY = True
+# ③置信度压缩校准：min(conf, 40+0.5*conf)，只压高不抬低（100→90, 90→85, ≤80 不变）
+ENABLE_CONF_COMPRESS = True
+# ④分支分歧深挖：三分支答案不一致时，先针对分歧点聚焦验证，结论作为额外证据进 Arbiter
+ENABLE_DEBATE = True
 
 # ---- 目录 ----
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

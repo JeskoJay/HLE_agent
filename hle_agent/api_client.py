@@ -5,6 +5,7 @@ deepseek-v4-pro 客户端封装。
 - 完整支持 function calling（tools / tool_calls）
 """
 import json
+import re
 import time
 import threading
 import urllib.request
@@ -254,7 +255,26 @@ def chat_with_tools(messages, tools, tool_executor, tool_meta,
                 "name": name,
                 "content": output,
             })
-    # 达到轮数上限，强制让模型总结
+    # 达到轮数上限，强制让模型总结：显式声明工具预算耗尽 + 不传 tools（模型无法再合法调工具），
+    # 避免模型在收尾轮输出原始 DSML tool_calls 标记污染下游上下文（v0.9 Q1/Q12 回退根因）。
+    messages.append({
+        "role": "user",
+        "content": ("Tool budget is exhausted. Do NOT call any tools. Based on all the "
+                    "observations above, output your final summary/answer NOW in the "
+                    "required format."),
+    })
     result = chat(messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout,
                   stream=stream, on_token=on_token)
+    result["content"] = sanitize_model_text(result.get("content") or "")
     return result
+
+
+# 原始工具调用/DSML 控制标记（模型越界输出时会泄漏到 content 中）
+_DSML_RE = re.compile(r"<\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}.*", re.S | re.I)
+
+
+def sanitize_model_text(text: str) -> str:
+    """清除 content 中泄漏的原始 DSML/tool_calls 控制标记（截断标记及其后的所有内容）。"""
+    if not text or "DSML" not in text:
+        return (text or "").strip()
+    return _DSML_RE.sub("", text).strip()

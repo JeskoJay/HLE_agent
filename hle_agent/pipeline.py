@@ -15,6 +15,8 @@ import sentinel
 import solver
 import arbiter
 import reflect
+import verifier
+import multiselect
 import api_client
 import rag_retriever
 import stream_logger
@@ -123,17 +125,79 @@ class Pipeline:
         # 4. Solver Pool（并行执行各分支；每分支可选自洽采样；计划注入各分支 prompt）
         branches = self._run_branches(question, domain, rag_context, plan, answer_type)
 
-        # 5. Arbiter
-        arb = arbiter.arbitrate(question, domain, branches, rag_context)
+        # 4.5 分歧深挖（v0.9-④）：三分支答案不一致时，针对分歧点聚焦验证再裁决
+        debate_notes = ""
+        if config.ENABLE_DEBATE and len(branches) > 1 and not arbiter.is_consistent(branches):
+            debate_notes = verifier.debate(question, domain, branches, rag_context)
+
+        # 5. Arbiter（分歧深挖结论作为额外证据注入）
+        arb = arbiter.arbitrate(question, domain, branches, rag_context,
+                                extra_evidence=debate_notes)
 
         # 5.5 Reflection (P0-§2): Critic + Refine 反思闭环
         reflected = reflect.improve(question, domain, branches, arb, rag_context)
 
-        # 5. 组装记录
+        # 6. 答案级后验证（v0.9-①②）
+        final_answer = reflected.get("final_answer") or ""
+        final_conf = reflected.get("final_confidence")
+        override_note = ""
+        opts = multiselect.detect(question, answer_type) \
+            if config.ENABLE_MULTISELECT_JUDGE else None
+        if opts:
+            # ① 多选组合题：逐选项独立判定后拼装
+            ms = multiselect.refine(question, domain, rag_context, opts, final_answer)
+            if ms["answer"]:
+                old_set = set(re.findall(r"[A-Z]", final_answer.upper()))
+                new_set = set(re.findall(r"[A-Z]", ms["answer"]))
+                if old_set != new_set:
+                    override_note = (f"[multiselect] per-option judging changed answer "
+                                     f"{final_answer!r} -> {ms['answer']!r}")
+                final_answer, final_conf = ms["answer"], ms["confidence"]
+        elif verifier.is_numeric_answer(final_answer, answer_type):
+            # ② 数值/特殊格式答案：独立代码复算，DISAGREE 且高置信才替换
+            v = verifier.verify_numeric(question, domain, rag_context, final_answer, plan)
+            if v:
+                override_note = (f"[verify] independent recompute changed answer "
+                                 f"{final_answer!r} -> {v['answer']!r}: {v['note'][:200]}")
+                final_answer, final_conf = v["answer"], v["confidence"]
+
+        # ②.5 空答案兜底不变量（P0）：最终答案绝不允许为空。
+        # 依次回退：Reflection -> Arbiter -> 置信度最高的分支；仍为空则置信度归 5。
+        if not str(final_answer).strip():
+            fallback = (arb.get("final_answer") or "").strip()
+            if not fallback:
+                best = max(branches, key=lambda b: b.get("confidence") or 0) \
+                    if branches else None
+                fallback = (best.get("answer") or "").strip() if best else ""
+            if fallback:
+                override_note = (override_note + " | " if override_note else "") + \
+                    f"[fallback] empty final answer -> arbiter/branch answer {fallback!r}"
+                final_answer = fallback
+                final_conf = min(int(final_conf or 50), 60)
+                stream_logger.block("FINAL", "空答案兜底触发", override_note)
+            else:
+                final_conf = 5
+                stream_logger.block("FINAL", "空答案且无可回退来源", "confidence -> 5")
+
+        # ③ 置信度压缩校准（只压高不抬低）
+        final_conf = verifier.compress_confidence(final_conf)
+
+        # 重组最终 response（保留 Reflection 的 Explanation，替换 Answer/Confidence）
+        exp_m = re.search(r"Explanation\s*:\s*(.+?)(?=\n\s*Answer\s*:)",
+                          reflected.get("response", ""), re.S | re.I)
+        explanation = exp_m.group(1).strip() if exp_m else reflected.get("response", "")
+        if override_note:
+            explanation = f"{explanation}\n[Post-verification] {override_note}"
+            stream_logger.block("VERIFY", "答案后验证覆写", override_note)
+        final_response = (f"Explanation: {explanation}\n"
+                          f"Answer: {final_answer}\nConfidence: {final_conf}%")
+
+        # 7. 组装记录
         rec = dict(q)
-        rec["response"] = reflected["response"]
-        stream_logger.block("FINAL", f"{qid} 最终答案 (conf={reflected.get('final_confidence')}%)",
-                            reflected["response"])
+        rec["response"] = final_response
+        reflected["final_confidence"] = final_conf
+        stream_logger.block("FINAL", f"{qid} 最终答案 (conf={final_conf}%)",
+                            final_response)
         rec["_meta"] = {
             "domain": domain,
             "rag_hits": len(rag_chunks),
@@ -146,7 +210,9 @@ class Pipeline:
             ],
             "arbiter_reason": arb.get("reason", ""),
             "critic": reflected.get("critique", ""),
-            "final_confidence": reflected.get("final_confidence"),
+            "debate": debate_notes[:800],
+            "post_verify": override_note,
+            "final_confidence": final_conf,
             "elapsed": round(time.time() - t0, 1),
         }
         # 每题独立产出文件

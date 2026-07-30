@@ -68,11 +68,9 @@ def python_execute(code: str) -> str:
         return f"[timeout] execution exceeded {TOOL_TIMEOUT}s and was killed."
     except Exception as e:
         return f"[error] {e}"
-    finally:
-        try:
-            os.remove(path)
-        except Exception:
-            pass
+    # 注意：不在此处删除临时脚本。宿主环境的安全删除守卫会在单轮删除次数
+    # 达到阈值(50)后拦截删除并可能终止进程（曾两次导致 Q1 全程崩溃）。
+    # 临时文件很小，统一留在 agent_tmp/ 由人工/定期清理。
 
 
 def calculate(expression: str) -> str:

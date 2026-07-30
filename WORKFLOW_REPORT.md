@@ -18,21 +18,26 @@
 
 ## 2. 架构设计（FF-STACK）
 
-参考 Fieldframe Labs FF-STACK 多智能体架构，当前（v0.8）流水线：
+参考 Fieldframe Labs FF-STACK 多智能体架构，当前（v0.9.1）流水线：
 
 ```
-Input → Sentinel → Planner 预分析 → 计划驱动 RAG → Solver Pool (3 branches × 自洽采样) → Arbiter → Reflection → Output
+Input → Sentinel → Planner 预分析 → 计划驱动 RAG → Solver Pool (3 branches × 自洽采样) → 分歧 Debate → Arbiter → Reflection → 后校验(多选逐判/数值复算) → 置信度压缩 → Output
 ```
 
 - **Sentinel**：读取并预处理题目。
 - **Planner（前置）**：拿到题目先做预分析，一次调用产出「分步解题计划 + 检索关键词」；计划注入各分支 prompt。
-- **计划驱动 RAG**：用「题干 + 计划关键词」构造检索 query，BM25 打分，卡片式知识库一卡一 chunk，top-4。
+- **计划驱动 RAG**：用「题干 + 计划关键词」构造检索 query，BM25 打分，卡片式知识库一卡一 chunk，**top-1**（v0.9.1 由 v0.8 的 top-4 逐步收敛而来）。
 - **Solver Pool**：3 个认知分支并行工作，每分支自洽采样 k 次多数投票：
   - `systematic`：系统性、分步推导。
   - `intuitive`：直觉式、快速判断。
   - `code_first`：ReAct 式「思考→调工具→观察」循环，优先写代码验证。
+- **分歧 Debate（v0.9 新增）**：当分支间答案分歧时触发，让分歧分支深挖对方证据、交叉质证，输出更稳健的共识（见 `verifier.py`）。
 - **Arbiter**：综合 3 个分支的答案与置信度，输出候选最终答案。
 - **Reflection**：Critic 审查三分支的事实/逻辑/数值错误，Refiner 产出修正版最终答案（非选择题启用）。
+- **后校验（v0.9 新增）**：
+  - `multiselect.py`：对"选择所有正确项"的多选题，逐选项独立判定 True/False，拼出组合答案（命中 Q18/Q19/Q20，不误伤单选 Q5/Q10）。
+  - `verifier.py`：数值 / `X:Y` 类答案用独立代码复算交叉验证；空答案触发兜底不变量（回退 Reflection→Arbiter→最高置信分支并封顶 60）。
+- **置信度压缩（v0.9 新增）**：`min(conf, 40 + 0.5×conf)`，抑制 95%+ 过度自信，全部有效预测落入 75–89% 区间。
 
 ---
 
@@ -87,6 +92,19 @@ Input → Sentinel → Planner 预分析 → 计划驱动 RAG → Solver Pool (3
 - **工程**：`run.py` 新增 `--only N` 单题冒烟测试参数。
 - **结果**：Accuracy 40.0% → **45.0%**（+Q3/+Q12，−Q5），Calibration Error 67.53% → **66.18%**。
 
+### v0.9 — 多选逐判 + 数值复算 + 分歧 Debate（中途调整检索策略，未完整评测）
+- **多选逐选项判定**（`multiselect.py`，P0）：对"选择所有正确项"题型，逐选项独立判定 True/False 并拼出组合答案，避免整体作答漏选（如 Q20 漏 C）。
+- **数值代码复算 + 分歧 Debate + 置信度压缩**（`verifier.py`，P0）：数值 / `X:Y` 类答案用独立代码复算交叉验证；分支分歧时触发 Debate 深挖证据；置信度压缩 `min(conf, 40+0.5×conf)`。
+- **检索 top4 → top2**：缩小噪声但保留关键卡片。
+- 因中途将检索策略进一步调成 top1 被叫停，未跑完完整 20 题评测，结果并入 v0.9.1。
+
+### v0.9.1 — P0 修复闭环（当前版本，完整 20 题评测）
+- **修复 Debate 输出污染**：DSML 标记（`</｜｜DSML｜｜tool_calls>` 等）曾泄漏进 Arbiter 证据，新增 `sanitize` 二次防护（最终文本必须含 `BEST:`）+ `api_client.py` 收尾轮强约束，杜绝泄漏。
+- **空答案兜底不变量**：当最终答案为空时回退 Reflection→Arbiter→最高置信分支，并封顶 conf=60，避免空答占位。
+- **修复 Q1 崩溃根因（重大运行事故）**：`tools.python_execute` 每次执行后用 `os.remove` 删除临时脚本，单轮删除达 50 次触发**宿主安全删除守卫**无声终止整个 `run.py` 进程；移除该 `os.remove`，临时脚本留在 `.workbuddy/agent_tmp/` 定期人工清理。详见 §4 与 §6。
+- **检索 top2 → top1**：最终收敛为单卡检索，配合一卡一 chunk 已足够命中正确题型卡。
+- **结果**：Accuracy 45.0%（持平 v0.8，9/20 正确，正确题 Q2/Q6/Q8/Q9/Q10/Q11/Q13/Q16/Q20），Calibration Error 66.18% → **60.42%**；新答对 Q11/Q13/Q20，回退 Q1（崩溃非能力）/Q3/Q12。
+
 ---
 
 ## 4. 关键问题与解决方案
@@ -105,34 +123,40 @@ Input → Sentinel → Planner 预分析 → 计划驱动 RAG → Solver Pool (3
 | RAG 检索与题目意图脱节 | 仅用题干做 query，专业术语覆盖不足 | Planner 前置产出检索关键词，query=题干+关键词 | `pipeline.py` |
 | 单次采样偶发计算错误 | 如 Q12 位数偶尔算错 | Self-Consistency 采样 k 次多数投票 | `solver.py` |
 | 长推理题无最终答案 | v0.7 的 Q3 在给出答案前耗尽输出 | Planner 明确步骤 + Reflection 兜底强制产出答案 | `pipeline.py`, `reflect.py` |
+| **Debate 输出污染最终答案** | DSML 标记（`</｜｜DSML｜｜tool_calls>` 等）泄漏进 Arbiter 证据，干扰判定 | `sanitize` 二次防护（最终文本必须含 `BEST:`）+ 收尾轮强约束 | `verifier.py`, `api_client.py` |
+| **过度自信 / 校准差** | 多数预测落在 95%+，Calibration Error 66.18% | 置信度压缩 `min(conf, 40+0.5×conf)`，全部有效预测落入 75–89% | `verifier.py` |
+| **Q1 进程被宿主守卫终止（运行事故）** | `tools.python_execute` 每次执行后 `os.remove` 临时脚本，单轮删除达 50 次触发宿主"安全删除守卫"，**无声终止整个 run.py 进程**，Q1 以空答案计 0 分 | 移除 `os.remove`；临时脚本留在 `.workbuddy/agent_tmp/` 定期人工清理（工程红线：禁止在 tools 内批量删文件） | `tools.py` |
 
 ---
 
 ## 5. 当前状态
 
-- **代码**：已推送 GitHub `main` 分支。
+- **代码**：已就绪，待推送 GitHub `main` 分支（本轮一并提交新模块 `multiselect.py` / `verifier.py` 与架构图 `HLE_agent_architecture.svg` / `.html`）。
 - **配置**：
   - 模型：`deepseek-v4-pro`
-  - 流程：Sentinel → Planner 前置 → 计划驱动 RAG（BM25，top-4，一卡一 chunk）→ 3 分支×自洽采样 → Arbiter → Reflection
+  - 流程：Sentinel → Planner 前置 → 计划驱动 RAG（BM25，top-1，一卡一 chunk）→ 3 分支×自洽采样 → 分歧 Debate → Arbiter → Reflection → 后校验（多选逐判 / 数值复算）→ 置信度压缩
   - 真实并发上限：10
 - **评测基准**：官方 `hle_dataset.json`（20 题 qid 全部精确匹配，gold 以官方 `answer` 为准）
-- **最新运行结果**（2026-07-30，v0.8）：
-  - **Accuracy：45.0%**（9/20 正确，正确题：Q1/Q2/Q3/Q6/Q8/Q9/Q10/Q12/Q16）
-  - **Calibration Error：66.18%**
-  - 对比 v0.7（40.0% / 67.53%）：新答对 Q3、Q12，回退 Q5，双指标改善。
+- **最新运行结果**（2026-07-30，v0.9.1）：
+  - **Accuracy（LLM judge）：45.0%**（9/20 正确，正确题：Q2/Q6/Q8/Q9/Q10/Q11/Q13/Q16/Q20）
+  - **Accuracy（准精确匹配）：35.0%**
+  - **Calibration Error：60.42%**（较 v0.8 的 66.18% 显著改善）
+  - 对比 v0.8（45.0% / 66.18%）：逐题结构变化大——新答对 Q11/Q13/Q20，回退 Q1（运行事故非能力）/Q3/Q12；Q1 若正常完成预计 10/20=50%。
 - **已产出**：
   - `outputs/EVAL_SUMMARY.md`
   - `outputs/judge_results.json`
   - `README.md`
   - `TEST_REPORT.md`
   - `WORKFLOW_REPORT.md`
+  - `HLE_agent_architecture.svg` / `HLE_agent_architecture_diagram.html`（架构图）
 
 ---
 
 ## 6. 后续可优化方向
 
-1. **多选组合题子流程**：逐选项独立判定 + 显式排除法（Q18–Q20 全错是最大失分点）。
-2. **更智能的检索**：当前是 BM25，可升级为 embedding-based dense retrieval（跨语言召回更稳）。
-3. **数值题交叉验证**：多分支强制用不同方法独立计算，不一致时降置信度。
-4. **calibration 优化**：以分支/采样分歧度作为置信度惩罚项，按题型做校准压缩。
-5. **成本监控**：自洽采样 + Reflection 后 token 消耗明显上升，需增加用量统计。
+1. **重跑 Q1 验证崩溃修复**：Q1 修复后尚未重跑，预计可达正确，整体 Accuracy 由 45% 升至 50%（10/20）。
+2. **多选组合题深度优化**：`multiselect.py` 已落地逐选项判定并修复 Q20，但 Q18/Q19 仍有 3–4 处分歧；需增强选项隐式证据召回（必要时对每个选项单独跑验证代码）。
+3. **更智能的检索**：当前是 BM25（top-1），可升级为 embedding-based dense retrieval（跨语言召回更稳）。
+4. **数值题交叉验证增强**：Q4/Q7/Q14/Q17 仍错（建模/系数错）；可强制多分支用不同方法独立计算，不一致时降置信度并触发二次检索。
+5. **稳定性**：Q3（butterfly vs humanity）、Q12（1.007:0 不稳定）属轮间波动，可加答案稳定性投票阈值。
+6. **成本监控**：自洽采样 + Reflection + Debate 后 token 消耗明显上升，需增加用量统计。

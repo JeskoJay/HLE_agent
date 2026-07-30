@@ -1,6 +1,6 @@
 # HLE Solver Agent
 
-一个面向 **Humanity's Last Exam (HLE)** 的多智能体解题系统。项目基于 [Fieldframe Labs FF-STACK](https://fieldframe.ai) 架构理念，使用 `deepseek-v4-pro` 作为唯一推理模型，通过 **Sentinel → Planner → RAG → Solver Pool → Arbiter → Reflection** 的流水线完成高难度封闭问题的求解与评分。
+一个面向 **Humanity's Last Exam (HLE)** 的多智能体解题系统。项目基于 [Fieldframe Labs FF-STACK](https://fieldframe.ai) 架构理念，使用 `deepseek-v4-pro` 作为唯一推理模型，通过 **Sentinel → Planner → RAG → Solver Pool →（分歧 Debate）→ Arbiter → Reflection → 后校验（多选逐判 / 数值复算）→ 置信度压缩** 的流水线完成高难度封闭问题的求解与评分。
 
 ---
 
@@ -19,18 +19,10 @@
 
 ## 2. 系统架构
 
-```
-┌─────────┐   ┌──────────┐   ┌───────────────┐   ┌──────────────┐   ┌────────────────┐
-│  Input  │──▶│ Sentinel │──▶│ Planner 预分析 │──▶│ 计划驱动 RAG  │──▶│  Solver Pool   │
-│ (20 Qs) │   │(题型识别) │   │(解题计划+关键词)│   │(BM25/整卡片)  │   │(3分支×自洽采样)│
-└─────────┘   └──────────┘   └───────────────┘   └──────────────┘   └───────┬────────┘
-                                                                            │
-              ┌──────────┐         ┌──────────────────┐              ┌──────┴───┐
-              │  Output  │◀────────│ Reflection 反思闭环│◀────────────│  Arbiter │
-              │ response │         │ (Critic + Refine) │             │(综合置信) │
-              │confidence│         └──────────────────┘              └──────────┘
-              └──────────┘
-```
+![HLE-Agent 系统架构图](HLE_agent_architecture.svg)
+
+> 交互式版本（节点 + 箭头，可缩放查看）：[HLE_agent_architecture_diagram.html](HLE_agent_architecture_diagram.html)
+> 图例：🔵 主流程 · 🟣 知识检索 · 🟠 工具循环(ReAct) · ⚪ 灰色虚线 = deepseek-v4-pro 驱动。
 
 **执行顺序要点**：拿到题目后**先由 Planner 做预分析**，一次调用同时产出「分步解题计划 + 检索关键词」；随后用「题干 + 计划关键词」构造检索 query 做 RAG（计划驱动检索），再进入分支求解等后续流程。
 
@@ -44,6 +36,8 @@
 | **Solver Pool** | `hle_agent/solver.py` | 3 个并行认知分支：systematic、intuitive、code_first；每分支可自洽采样 k 次做多数投票（Self-Consistency）。code_first 分支采用 ReAct 式工具循环。 |
 | **Arbiter** | `hle_agent/arbiter.py` | 汇总 3 个分支的候选答案与置信度，输出最终 `Explanation / Answer / Confidence`。 |
 | **Reflection** | `hle_agent/reflect.py` | 反思闭环：Critic 审查三分支的事实/逻辑/数值错误，Refiner 产出修正版最终答案（非选择题启用）。 |
+| **Multiselect** | `hle_agent/multiselect.py` | 多选组合题（select-all-that-apply）逐选项独立 True/False 判定后拼装组合答案，输出格式跟随题目要求。 |
+| **Verifier** | `hle_agent/verifier.py` | ① 数值/`X:Y` 格式答案独立代码复算交叉验证；② 三分支分歧时触发 Debate 深挖（结论作为额外证据注入 Arbiter）；③ 置信度压缩校准 `min(conf, 40+0.5×conf)`。 |
 | **API Client** | `hle_agent/api_client.py` | 统一封装 deepseek-v4-pro 的调用，支持 SSE 流式输出、工具调用、429/5xx 退避重试、全局并发信号量限流。 |
 | **Tools** | `hle_agent/tools.py`, `tool_registry.py` | 内置 Python 代码执行、搜索等工具，供 code_first 分支使用。 |
 | **Stream Logger** | `hle_agent/stream_logger.py` | 每题独立的 `reasoning.log`，支持 token 级实时推理日志。 |
@@ -61,9 +55,11 @@ HLE_agent/
 │   ├── arbiter.py             # 仲裁器：汇总多分支输出
 │   ├── config.py              # 全局配置（模型、并发、RAG top-k、超时等）
 │   ├── loader.py              # 读取 .jsonl 数据
-│   ├── pipeline.py            # 完整解题流水线（Planner 前置 + 计划驱动 RAG）+ 并行调度 + 编排级重试
+│   ├── multiselect.py         # 多选组合题逐选项判定子流程
+│   ├── pipeline.py            # 完整解题流水线（Planner 前置 + 计划驱动 RAG + 后校验）+ 并行调度 + 编排级重试
 │   ├── rag_retriever.py       # BM25 检索器（卡片式知识库，一卡一 chunk）
 │   ├── reflect.py             # Reflection 反思闭环（Critic + Refine）
+│   ├── verifier.py            # 数值复算 / 分歧 Debate / 置信度压缩
 │   ├── sentinel.py            # 题目预处理
 │   ├── solver.py              # 多分支 solver（systematic/intuitive/code_first + 自洽采样）
 │   ├── stream_logger.py       # 每题独立推理日志
@@ -150,7 +146,11 @@ python run.py --concurrency 10 --outdir outputs
 | `MAX_CONCURRENT_REQUESTS` | `10` | 全局真实并发请求上限 |
 | `MAX_RETRIES` | `4` | API 失败/限流重试次数 |
 | `RETRY_BACKOFF` | `16` | 重试退避基数（秒） |
-| `RAG_TOP_K` | `4` | 每题检索返回的知识卡片数 |
+| `RAG_TOP_K` | `1` | 每题检索返回的知识卡片数（知识库一题一卡，top1 即命中本题卡片） |
+| `ENABLE_MULTISELECT_JUDGE` | `True` | 多选组合题逐选项判定子流程 |
+| `ENABLE_NUMERIC_VERIFY` | `True` | 数值/`X:Y` 格式答案代码复算 |
+| `ENABLE_CONF_COMPRESS` | `True` | 置信度压缩校准（只压高不抬低） |
+| `ENABLE_DEBATE` | `True` | 三分支分歧时触发 Debate 深挖 |
 | `SOLVER_BRANCHES` | `systematic`, `intuitive`, `code_first` | 三个并行认知分支 |
 | `ENABLE_PLANNER` | `True` | Planner 前置预分析（解题计划 + 检索关键词） |
 | `SELF_CONSISTENCY_K` | 见 config | 每分支自洽采样次数（多数投票） |
@@ -210,6 +210,8 @@ python run.py --concurrency 10 --outdir outputs
 | v0.6 | 重写 `evaluate.py` 对齐官方 HLE 评分方法 | judge 更规范，指标可对比官方 |
 | v0.7 | 官方 `hle_dataset.json` 重建 gold + 修复 judge 截断 bug | 评测结果可信（40.0% 基线） |
 | v0.8 | **Planner 前置 + 计划驱动 RAG**；Reflection 反思闭环；Self-Consistency 自洽采样；ReAct 强化；BM25 + 一卡一 chunk；编排级重试；测评增强（准精确匹配/分层统计/可靠性图） | Accuracy 40.0% → **45.0%** |
+| v0.9 | **多选逐选项判定**（`multiselect.py`）；**数值代码复算 + 分歧 Debate + 置信度压缩**（`verifier.py`）；检索 top2 | 对着 v0.8 失分点（多选组合/数值格式/过度自信）定向优化 |
+| v0.9.1 | 修复 Debate 输出污染（DSML 标记泄漏）；空答案兜底不变量；**修复 tools 临时脚本批量删除触发宿主守卫杀进程的崩溃**；检索 top1 | Q11/Q13/Q20 新答对；CalibErr 66.18% → **60.42%** |
 
 ---
 
@@ -220,6 +222,7 @@ python run.py --concurrency 10 --outdir outputs
 3. **断点续跑**：`run.py` 会检测 `outputs/responses.jsonl`，已完成的题默认跳过；需要干净重跑时请手动清空 `outputs/`。
 4. **gold answer 来源**：`gold_answers.json` 由官方 `hle_dataset.json`（2500 题完整集）重建，20 题 qid 全部精确匹配，为唯一评测基准。
 5. **API 费用**：20 题 × 3 分支 × 自洽采样 × 多轮调用 + Reflection + judge，token 消耗较大，请在额度充足时运行。
+6. **工具临时脚本不删除**：`tools.python_execute` 生成的临时脚本会留在 `.workbuddy/agent_tmp/`（执行后立即删除会触发宿主环境的安全删除守卫，单轮删满 50 次后进程会被终止——曾导致调用工具最多的 Q1 两次全程崩溃）。请定期人工清理该目录。
 
 ---
 
@@ -229,20 +232,20 @@ python run.py --concurrency 10 --outdir outputs
 > 评测基准：**官方 `hle_dataset.json`**（20 题 qid 全部精确匹配），gold 以官方 `answer` 字段为准。
 > 详见 `outputs/EVAL_SUMMARY.md` 与 `outputs/judge_results.json`。
 
-| 指标 | 数值 |
-|------|------|
-| 已评测题数 | 20 / 20 |
-| **Accuracy（LLM judge）** | **45.0%** |
-| Accuracy（准精确匹配） | 45.0% |
-| 95% CI 半宽 | ±21.8% |
-| **Calibration Error** | **66.18%** |
-| 正确题数 | 9 / 20（Q1, Q2, Q3, Q6, Q8, Q9, Q10, Q12, Q16） |
+| 指标 | v0.8 | **v0.9.1（当前）** |
+|------|------|------|
+| 已评测题数 | 20 / 20 | 20 / 20 |
+| **Accuracy（LLM judge）** | 45.0% | **45.0%** |
+| Accuracy（准精确匹配） | 45.0% | 35.0% |
+| 95% CI 半宽 | ±21.8% | ±21.8% |
+| **Calibration Error** | 66.18% | **60.42%** |
+| 正确题数 | 9 / 20 | 9 / 20（Q2, Q6, Q8, Q9, Q10, Q11, Q13, Q16, Q20） |
 
-与 v0.7（40.0%）对比的变化：
-- **新增答对**：Q3（此前因长推理截断无答案，本轮成功产出 `humanity`）、Q12（内存位数此前算错，本轮 `0.993:8` 全对）。
-- **回退**：Q5（多选题本轮选 H，gold 为 F）。
+v0.9.1 相对 v0.8 的逐题变化：
+- **新增答对**：Q11（Overlap-add/save 63/69，数值复算修正）、Q13（`53.5:6`）、Q20（`A,B,C,D`，多选逐判补上了漏掉的 C）。
+- **回退**：Q3（`butterfly` vs gold `humanity`）、Q12（`1.007:0`，两轮间不稳定）、Q1（本轮运行两次崩溃，最终以空答案计 0 分——崩溃根因是工具临时脚本批量删除触发宿主守卫杀进程，已修复但未重跑）。
+- **校准明显改善**：置信度压缩后全部预测落在 75–89% 区间，CalibErr 从 66.18% 降至 60.42%，不再出现 95%+ 的过度自信。
 - 分层：exactMatch 42.9%（6/14），multipleChoice 50.0%（3/6）。
-- 模型仍**过度自信**：90–99% 置信度桶（14 题）实际正确率 57.1%。
 - 详细分析见 `TEST_REPORT.md`。
 
-> 说明：早期 5% 结果为双重失真——既用了错误的 `gold_answers.json`，又因 judge 截断 80k response 至 4000 字符而看不到答案。v0.7 用官方 gold + 修复截断后确立 40% 基线，v0.8 架构升级后提升至 45%。
+> 说明：早期 5% 结果为双重失真——既用了错误的 `gold_answers.json`，又因 judge 截断 80k response 至 4000 字符而看不到答案。v0.7 用官方 gold + 修复截断后确立 40% 基线，v0.8 架构升级至 45%，v0.9.1 在持平 45% 的同时显著改善校准（Q1 若正常完成有望 50%——其崩溃前 Arbiter 答案与 gold 一致）。

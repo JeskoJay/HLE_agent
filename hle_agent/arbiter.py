@@ -37,9 +37,17 @@ def _normalize(a: str) -> str:
     return a
 
 
-def arbitrate(question: str, domain: str, branches: list, rag_context: str = "") -> dict:
+def is_consistent(branches: list) -> bool:
+    """三分支归一化后答案是否完全一致（供分歧深挖判断使用）。"""
+    norm_answers = [_normalize(b.get("answer", "")) for b in branches]
+    return len(set(norm_answers)) == 1 and all(norm_answers)
+
+
+def arbitrate(question: str, domain: str, branches: list, rag_context: str = "",
+              extra_evidence: str = "") -> dict:
     """
     branches: solver.parse_response 结果列表，每个含 name/answer/explanation/confidence/reasoning/tool_log
+    extra_evidence: 分歧深挖（debate）产出的针对性验证结论，作为额外证据注入仲裁
     返回 {"response": str, "final_answer": str, "final_confidence": int, "reason": str}
     """
     # 一致性快速判断
@@ -64,7 +72,11 @@ def arbitrate(question: str, domain: str, branches: list, rag_context: str = "")
     if rag_context:
         user += f"Reference material:\n{rag_context}\n\n"
     user += "Problem:\n" + question + "\n\nCandidate answers:\n" + "\n\n".join(branch_text)
-    user += "\n\nAll branches agree: " + ("YES" if consistent else "NO") + "\n\nProduce the FINAL answer now."
+    user += "\n\nAll branches agree: " + ("YES" if consistent else "NO")
+    if extra_evidence:
+        user += ("\n\nTargeted disagreement-resolution findings "
+                 "(independent focused verification, weigh heavily):\n" + extra_evidence)
+    user += "\n\nProduce the FINAL answer now."
 
     messages = [
         {"role": "system", "content": ARBITER_SYSTEM},

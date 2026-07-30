@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>HLE-Agent 架构图（节点 + 箭头）</title>
+<style>
+  :root{
+    --bg:#0b0f1a; --panel:#111827; --line:#26324a; --txt:#e6edf7; --dim:#9fb0cc; --faint:#6b7d9c;
+    --sky:#38bdf8; --emerald:#34d399; --amber:#fbbf24; --violet:#a78bfa; --pink:#f472b6;
+    --orange:#fb923c; --red:#f87171; --cyan:#22d3ee; --slate:#94a3b8; --blue:#5b7bb5;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:radial-gradient(1100px 600px at 20% -10%,rgba(56,189,248,.08),transparent 60%),var(--bg);
+    color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,sans-serif;
+    padding:24px 18px 60px;-webkit-font-smoothing:antialiased}
+  .top{max-width:1240px;margin:0 auto 16px}
+  .top h1{font-size:22px;letter-spacing:.3px}
+  .top p{color:var(--dim);font-size:13px;margin-top:4px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+  .legend .li{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim)}
+  .legend .sw{width:22px;height:0;border-top:3px solid var(--blue)}
+  .legend .sw.dash{border-top-style:dashed}
+  .legend .sw.k{height:12px;border:none;border-radius:3px}
+  .scroll{max-width:1240px;margin:0 auto;overflow:auto;padding-bottom:8px}
+  .diagram{position:relative;width:1180px;height:1130px;margin:0 auto;
+    background:linear-gradient(180deg,rgba(255,255,255,.015),transparent);
+    border:1px solid var(--line);border-radius:16px}
+  svg.edges{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .node{position:absolute;border-radius:12px;background:linear-gradient(180deg,#16203400,#0e1626);
+    border:1px solid var(--line);overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.35)}
+  .node .bar{height:5px;width:100%}
+  .node .body{padding:9px 12px}
+  .node .tt{font-weight:800;font-size:14px;line-height:1.2}
+  .node .sf{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10.5px;color:var(--faint);margin-top:3px}
+  .node.small .tt{font-size:13px}
+  .node .tag{display:inline-block;font-size:9.5px;padding:1px 6px;border-radius:5px;margin-top:6px;
+    background:rgba(255,255,255,.06);color:var(--dim);border:1px solid var(--line)}
+  .container{position:absolute;border:1.5px dashed var(--pink);border-radius:16px;background:rgba(244,114,182,.04)}
+  .container .ctitle{position:absolute;top:8px;left:14px;font-size:12px;font-weight:700;color:var(--pink)}
+  .footer{max-width:1240px;margin:18px auto 0;color:var(--faint);font-size:12px;text-align:center}
+  .footer b{color:var(--dim)}
+  .edge-label{font-size:11px;fill:#cbd5e1;font-family:ui-monospace,Menlo,monospace;paint-order:stroke;stroke:#0b0f1a;stroke-width:3.5px;stroke-linejoin:round}
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>HLE-Agent 架构图 · v0.8</h1>
+  <p>每个 Agent / 模块为独立节点，箭头表示数据与控制流向。虚线 = 模型能力驱动；橙色双箭头 = ReAct 工具循环；琥珀色 = 评测反馈闭环。</p>
+  <div class="legend">
+    <div class="li"><span class="sw"></span>主流程（题→解→答）</div>
+    <div class="li"><span class="sw" style="border-color:var(--violet)"></span>知识检索</div>
+    <div class="li"><span class="sw" style="border-color:var(--orange)"></span>工具调用</div>
+    <div class="li"><span class="sw dash" style="border-color:var(--slate)"></span>deepseek-v4-pro 驱动</div>
+    <div class="li"><span class="sw k" style="background:var(--emerald)"></span>Agent</div>
+    <div class="li"><span class="sw k" style="background:var(--cyan)"></span>引擎/IO</div>
+  </div>
+</div>
+
+<div class="scroll">
+  <div class="diagram" id="diagram">
+    <svg class="edges" id="edges" width="1180" height="1130">
+      <defs>
+        <marker id="ah-blue" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5b7bb5"/></marker>
+        <marker id="ah-violet" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#a78bfa"/></marker>
+        <marker id="ah-orange" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#fb923c"/></marker>
+        <marker id="ah-slate" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#6b7d9c"/></marker>
+      </defs>
+    </svg>
+    <!-- nodes injected by JS -->
+  </div>
+</div>
+
+<div class="footer">基于 <b>README.md (v0.8)</b> 与 <b>HLE_Agent框架改进建议.md</b> 还原 · 基线 Accuracy 45.0% / Calibration Error 66.18% · 当前 9/20 正确</div>
+
+<script>
+const NODES = [
+  {id:'input',  x:40,  y:70,  w:225, h:66,  title:'题目输入',          sub:'20 题 · loader',               color:'#38bdf8', kind:'io'},
+  {id:'model',  x:885, y:46,  w:255, h:88,  title:'deepseek-v4-pro 推理引擎', sub:'api_client · SSE/重试/限流', color:'#22d3ee', kind:'engine'},
+
+  {id:'sentinel',  x:472, y:66,  w:215, h:64, title:'Sentinel',  sub:'sentinel.py · 域分类',       color:'#34d399', kind:'agent'},
+  {id:'planner',   x:472, y:186, w:215, h:64, title:'Planner',   sub:'pipeline.py · 预分析',      color:'#fbbf24', kind:'agent'},
+  {id:'rag',       x:472, y:306, w:215, h:64, title:'RAG Retriever', sub:'rag_retriever.py · BM25', color:'#a78bfa', kind:'agent'},
+
+  {id:'solver', x:255, y:420, w:640, h:188, container:true, title:'Solver Pool · 3 并行认知分支'},
+  {id:'sys',  x:285, y:466, w:170, h:118, title:'systematic', sub:'T=0.2 · 方法化',  color:'#38bdf8', kind:'branch'},
+  {id:'int',  x:505, y:466, w:170, h:118, title:'intuitive',   sub:'T=0.6 · 模式识别', color:'#34d399', kind:'branch'},
+  {id:'code', x:725, y:466, w:170, h:118, title:'code_first',  sub:'T=0.3 · ReAct',   color:'#a78bfa', kind:'branch'},
+
+  {id:'kb',    x:885, y:306, w:255, h:66, title:'知识库 KB', sub:'卡片式先验 · 一卡一chunk', color:'#a78bfa', kind:'io'},
+  {id:'tools', x:885, y:470, w:255, h:72, title:'Tools 工具', sub:'python_execute / 搜索',   color:'#fb923c', kind:'io'},
+
+  {id:'arbiter',   x:472, y:660, w:215, h:64, title:'Arbiter',    sub:'arbiter.py · 三维打分',     color:'#fb923c', kind:'agent'},
+  {id:'reflection',x:472, y:780, w:215, h:64, title:'Reflection', sub:'reflect.py · Critic+Refine', color:'#f87171', kind:'agent'},
+  {id:'output',    x:472, y:900, w:215, h:64, title:'Exporter 输出', sub:'response.json / meta.json', color:'#22d3ee', kind:'io'},
+
+  {id:'evaluate', x:472, y:1024, w:215, h:74, title:'Evaluate 评测', sub:'evaluate.py · LLM Judge', color:'#22d3ee', kind:'agent'},
+  {id:'gold',     x:885, y:900, w:255, h:66, title:'Gold 基准', sub:'gold_answers.json · 官方', color:'#34d399', kind:'io'},
+];
+
+const EDGES = [
+  // main flow
+  {f:'input', t:'sentinel', kind:'flow', label:'题干'},
+  {f:'sentinel', t:'planner', kind:'flow'},
+  {f:'planner', t:'rag', kind:'flow', label:'计划驱动'},
+  {f:'rag', t:'solver', kind:'flow', label:'检索上下文'},
+  {f:'sys', t:'arbiter', kind:'flow'},
+  {f:'int', t:'arbiter', kind:'flow'},
+  {f:'code', t:'arbiter', kind:'flow', label:'三分支汇聚'},
+  {f:'arbiter', t:'reflection', kind:'flow', label:'Critic+Refine'},
+  {f:'reflection', t:'output', kind:'flow'},
+  {f:'output', t:'evaluate', kind:'flow', label:'response'},
+  // knowledge
+  {f:'kb', t:'rag', kind:'know', label:'top-K 卡片'},
+  {f:'gold', t:'evaluate', kind:'know', label:'gold 判定'},
+  // tool loop
+  {f:'code', t:'tools', kind:'tool', label:'Action'},
+  {f:'tools', t:'code', kind:'tool', label:'Observation'},
+  // model drives
+  {f:'model', t:'sentinel', kind:'drive'},
+  {f:'model', t:'planner', kind:'drive'},
+  {f:'model', t:'rag', kind:'drive'},
+  {f:'model', t:'solver', kind:'drive'},
+  {f:'model', t:'arbiter', kind:'drive'},
+  {f:'model', t:'reflection', kind:'drive'},
+  {f:'model', t:'evaluate', kind:'drive'},
+];
+
+const KIND = {
+  flow:    {color:'#5b7bb5', dash:false, marker:'ah-blue'},
+  know:    {color:'#a78bfa', dash:false, marker:'ah-violet'},
+  tool:    {color:'#fb923c', dash:false, marker:'ah-orange'},
+  drive:   {color:'#6b7d9c', dash:true,  marker:'ah-slate', op:.55},
+};
+
+const diagram = document.getElementById('diagram');
+const svg = document.getElementById('edges');
+const SVGNS = 'http://www.w3.org/2000/svg';
+const byId = {};
+
+// render nodes
+NODES.forEach(n=>{
+  let el;
+  if(n.container){
+    el = document.createElement('div');
+    el.className='container';
+    el.style.cssText = `left:${n.x}px;top:${n.y}px;width:${n.w}px;height:${n.h}px;border-color:${n.color}`;
+    const t=document.createElement('div'); t.className='ctitle'; t.textContent=n.title; t.style.color=n.color;
+    el.appendChild(t);
+  } else {
+    el = document.createElement('div');
+    el.className='node'+(n.kind==='branch'?' small':'');
+    el.style.cssText = `left:${n.x}px;top:${n.y}px;width:${n.w}px;height:${n.h}px`;
+    const bar=document.createElement('div'); bar.className='bar'; bar.style.background=n.color;
+    const body=document.createElement('div'); body.className='body';
+    body.innerHTML = `<div class="tt" style="color:${n.color}">${n.title}</div><div class="sf">${n.sub||''}</div>`
+      + (n.kind==='branch'?`<span class="tag">并行分支</span>`:'');
+    el.appendChild(bar); el.appendChild(body);
+  }
+  diagram.appendChild(el);
+  byId[n.id]=el;
+});
+
+// border intersection point on rect toward (tx,ty)
+function borderPoint(r, tx, ty){
+  const cx=r.left+r.width/2, cy=r.top+r.height/2;
+  const dx=tx-cx, dy=ty-cy;
+  if(dx===0&&dy===0) return {x:cx,y:cy};
+  const hw=r.width/2, hh=r.height/2;
+  const sx = dx!==0 ? hw/Math.abs(dx) : Infinity;
+  const sy = dy!==0 ? hh/Math.abs(dy) : Infinity;
+  const s = Math.min(sx,sy);
+  return {x:cx+dx*s, y:cy+dy*s};
+}
+const dRect = ()=>diagram.getBoundingClientRect();
+function center(el){const r=el.getBoundingClientRect();const d=dRect();return {x:r.left-d.left+r.width/2, y:r.top-d.top+r.height/2};}
+
+function draw(){
+  // clear old edges (keep defs)
+  [...svg.querySelectorAll('g.edge')].forEach(g=>g.remove());
+  EDGES.forEach(e=>{
+    const a=byId[e.f], b=byId[e.t];
+    const ra=a.getBoundingClientRect(), rb=b.getBoundingClientRect(), d=dRect();
+    ra2={left:ra.left-d.left,top:ra.top-d.top,width:ra.width,height:ra.height};
+    rb2={left:rb.left-d.left,top:rb.top-d.top,width:rb.width,height:rb.height};
+    const ca=center(a), cb=center(b);
+    const p1=borderPoint(ra2, cb.x, cb.y);
+    const p2=borderPoint(rb2, ca.x, ca.y);
+    const k=KIND[e.kind];
+    const g=document.createElementNS(SVGNS,'g'); g.setAttribute('class','edge');
+    let dpath;
+    if(e.curve){
+      const mx=1170, my=(p1.y+p2.y)/2;
+      dpath=`M ${p1.x} ${p1.y} Q ${mx} ${my} ${p2.x} ${p2.y}`;
+    } else {
+      dpath=`M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`;
+    }
+    const path=document.createElementNS(SVGNS,'path');
+    path.setAttribute('d',dpath);
+    path.setAttribute('fill','none');
+    path.setAttribute('stroke',k.color);
+    path.setAttribute('stroke-width', e.kind==='drive'?'1.6':'2.4');
+    path.setAttribute('marker-end',`url(#${k.marker})`);
+    if(k.dash) path.setAttribute('stroke-dasharray','6 5');
+    if(k.op) path.setAttribute('opacity',k.op);
+    g.appendChild(path);
+    if(e.label){
+      const lx=e.curve? (p1.x+p2.x)/2 + 120 : (p1.x+p2.x)/2;
+      const ly=e.curve? (p1.y+p2.y)/2 : (p1.y+p2.y)/2 - 4;
+      const txt=document.createElementNS(SVGNS,'text');
+      txt.setAttribute('x',lx); txt.setAttribute('y',ly);
+      txt.setAttribute('text-anchor','middle');
+      txt.setAttribute('class','edge-label');
+      txt.textContent=e.label;
+      g.appendChild(txt);
+    }
+    svg.appendChild(g);
+  });
+}
+window.addEventListener('load',draw);
+// also draw after fonts/layout settle
+setTimeout(draw,60);
+window.addEventListener('resize',draw);
+</script>
+</body>
+</html>

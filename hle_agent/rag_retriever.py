@@ -67,10 +67,31 @@ def _fixed_chunk(text: str, size: int, overlap: int) -> list:
     return out
 
 
+_CARD_LINE_RE = re.compile(r"^(Keywords\s*:|关键词[:：])", re.I)
+
+
 def _split_chunks(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP) -> list:
     text = _strip_frontmatter(text.strip())
     if not text:
         return []
+    # 卡片式知识库：以 Keywords:/关键词 开头的行标记一张卡片的起点。
+    # 按起点分组，把后续行并入同一张卡片 => 每题一整段作为一个 chunk，
+    # 保持卡片完整（语义单元），绝不做固定窗口二次切分。
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    has_heading = any(re.match(r"^#{1,6}\s", l) for l in lines)
+    n_card_starts = sum(1 for l in lines if _CARD_LINE_RE.match(l))
+    if not has_heading and n_card_starts >= 2:
+        cards, cur = [], []
+        for l in lines:
+            if _CARD_LINE_RE.match(l):
+                if cur:
+                    cards.append(" ".join(cur))
+                cur = [l]
+            else:
+                cur.append(l)
+        if cur:
+            cards.append(" ".join(cur))
+        return cards
     chunks = []
     for sec in _split_into_sections(text):
         if len(sec) <= size:
@@ -130,7 +151,10 @@ class SimpleRAGRetriever(RetrieverBase):
                     for w in set(toks):
                         self.df[w] += 1
         n_docs = max(len(self.doc_chunks), 1)
-        self.idf = {w: math.log((n_docs + 1) / (c + 1)) + 1 for w, c in self.df.items()}
+        # BM25 idf：常见词（几乎每张卡都出现）权重趋近 0，避免通用词淹没主题词
+        self.idf = {w: max(math.log((n_docs - c + 0.5) / (c + 0.5) + 1), 0.05)
+                    for w, c in self.df.items()}
+        self._avg_len = sum(sum(d["tf"].values()) for d in self.doc_chunks) / n_docs
         self._built = True
 
     def retrieve(self, query: str, k: int = 4) -> list:
@@ -139,12 +163,16 @@ class SimpleRAGRetriever(RetrieverBase):
             return []
         q_toks = _tokenize(query)
         q_tf = Counter(q_toks)
+        k1, b = 1.5, 0.75  # BM25：词频饱和 + 文档长度归一
         scores = []
         for doc in self.doc_chunks:
+            dl = sum(doc["tf"].values()) or 1
+            norm = k1 * (1 - b + b * dl / self._avg_len)
             score = 0.0
-            for w, c in q_tf.items():
-                if w in doc["tf"]:
-                    score += (c) * self.idf.get(w, 0) * doc["tf"][w]
+            for w in q_tf:
+                f = doc["tf"].get(w, 0)
+                if f:
+                    score += self.idf.get(w, 0) * f * (k1 + 1) / (f + norm)
             scores.append((score, doc))
         scores.sort(key=lambda x: x[0], reverse=True)
         out = []

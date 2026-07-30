@@ -18,19 +18,21 @@
 
 ## 2. 架构设计（FF-STACK）
 
-参考 Fieldframe Labs FF-STACK 多智能体架构，设计如下流水线：
+参考 Fieldframe Labs FF-STACK 多智能体架构，当前（v0.8）流水线：
 
 ```
-Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Output
+Input → Sentinel → Planner 预分析 → 计划驱动 RAG → Solver Pool (3 branches × 自洽采样) → Arbiter → Reflection → Output
 ```
 
 - **Sentinel**：读取并预处理题目。
-- **Forge/RAG**：从知识库中检索相关题型卡片，为 solver 提供上下文。
-- **Solver Pool**：3 个认知分支并行工作：
+- **Planner（前置）**：拿到题目先做预分析，一次调用产出「分步解题计划 + 检索关键词」；计划注入各分支 prompt。
+- **计划驱动 RAG**：用「题干 + 计划关键词」构造检索 query，BM25 打分，卡片式知识库一卡一 chunk，top-4。
+- **Solver Pool**：3 个认知分支并行工作，每分支自洽采样 k 次多数投票：
   - `systematic`：系统性、分步推导。
   - `intuitive`：直觉式、快速判断。
-  - `code_first`：优先写代码/调用工具验证。
-- **Arbiter**：综合 3 个分支的答案与置信度，输出最终答案。
+  - `code_first`：ReAct 式「思考→调工具→观察」循环，优先写代码验证。
+- **Arbiter**：综合 3 个分支的答案与置信度，输出候选最终答案。
+- **Reflection**：Critic 审查三分支的事实/逻辑/数值错误，Refiner 产出修正版最终答案（非选择题启用）。
 
 ---
 
@@ -70,6 +72,21 @@ Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Ou
   - 校准误差改用官方 `calib_err`（排序后分桶，beta=100，L2）。
   - 新增 `judge_results.json` 保存每题详细判定结果，便于审计。
 
+### v0.7 — 官方 gold 重建与 judge 截断修复
+- 用官方 `hle_dataset.json`（2500 题完整集）重建 `gold_answers.json`（旧 gold 答案错误，已删除）。
+- 修复 judge 截断 bug（`response[:4000]` → 全文，上限 120k），准确率从失真的 5% 修正为可信的 **40.0%**。
+
+### v0.8 — P0/P1 架构升级（当前版本）
+- **Planner 前置 + 计划驱动 RAG**（用户提出）：拿到题目先预分析生成解题计划与检索关键词，再用关键词驱动检索，之后进入求解流程。
+- **Reflection 反思闭环**（P0）：新增 `reflect.py`，Arbiter 后 Critic+Refine 修正最终答案。
+- **Self-Consistency 自洽采样**（P0）：每分支采样 k 次，答案与置信度多数投票。
+- **编排级重试**（P0）：单题流水线失败自动指数退避重试。
+- **ReAct 强化**（P1）：code_first 分支显式「思考→调工具→观察」循环。
+- **测评增强**（P1）：准精确匹配（集合/顺序/单位/大小写归一化）、按题型/领域分层统计、可靠性图。
+- **知识库与检索重构**：换用中英双语卡片式先验知识库（每题一张卡，共 40 张）；chunk 策略改为**一张卡片=一个 chunk**（修复了窗口切分导致只检索出半句话的问题）；TF-IDF 升级为 **BM25**。
+- **工程**：`run.py` 新增 `--only N` 单题冒烟测试参数。
+- **结果**：Accuracy 40.0% → **45.0%**（+Q3/+Q12，−Q5），Calibration Error 67.53% → **66.18%**。
+
 ---
 
 ## 4. 关键问题与解决方案
@@ -84,6 +101,10 @@ Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Ou
 | 评分方法与官方不一致 | 指标不可比、confidence 未验证 | 重写 `evaluate.py` 对齐官方 judge prompt 与 calib_err | `evaluate.py` |
 | gold_answers.json 答案错误 | 旧 gold 与官方答案对不上（如 Q1/Q2），且 7 条无法溯源、疑似循环自评 | 用官方 `hle_dataset.json` 完整集重建 gold（20 题 qid 精确匹配） | `gold_answers.json` |
 | **judge 截断 response 致误判** | `response[:4000]` 把 80k 字符末尾答案切掉，judge 抽不到答案、系统性判错 | 改为不截断（上限 120k），与官方一致；并给 judge 循环加并发 | `evaluate.py` |
+| 卡片式知识库被窗口切碎 | 800 字符滑窗把一张题型卡切成碎片，检索只命中半句话 | chunk 策略改为一张卡片=一个 chunk，保持语义单元完整 | `rag_retriever.py` |
+| RAG 检索与题目意图脱节 | 仅用题干做 query，专业术语覆盖不足 | Planner 前置产出检索关键词，query=题干+关键词 | `pipeline.py` |
+| 单次采样偶发计算错误 | 如 Q12 位数偶尔算错 | Self-Consistency 采样 k 次多数投票 | `solver.py` |
+| 长推理题无最终答案 | v0.7 的 Q3 在给出答案前耗尽输出 | Planner 明确步骤 + Reflection 兜底强制产出答案 | `pipeline.py`, `reflect.py` |
 
 ---
 
@@ -92,14 +113,13 @@ Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Ou
 - **代码**：已推送 GitHub `main` 分支。
 - **配置**：
   - 模型：`deepseek-v4-pro`
-  - RAG top-k：4
+  - 流程：Sentinel → Planner 前置 → 计划驱动 RAG（BM25，top-4，一卡一 chunk）→ 3 分支×自洽采样 → Arbiter → Reflection
   - 真实并发上限：10
-  - 分支：systematic / intuitive / code_first
 - **评测基准**：官方 `hle_dataset.json`（20 题 qid 全部精确匹配，gold 以官方 `answer` 为准）
-- **最新运行结果**（2026-07-30，v0.7）：
-  - **Accuracy：40.0%**（8/20 正确，正确题：Q1/Q2/Q5/Q6/Q8/Q9/Q10/Q16）
-  - **Calibration Error：67.53%**
-  - 早期 5% 为双重失真结果（错误 gold + judge 截断 bug），已修正。
+- **最新运行结果**（2026-07-30，v0.8）：
+  - **Accuracy：45.0%**（9/20 正确，正确题：Q1/Q2/Q3/Q6/Q8/Q9/Q10/Q12/Q16）
+  - **Calibration Error：66.18%**
+  - 对比 v0.7（40.0% / 67.53%）：新答对 Q3、Q12，回退 Q5，双指标改善。
 - **已产出**：
   - `outputs/EVAL_SUMMARY.md`
   - `outputs/judge_results.json`
@@ -111,8 +131,8 @@ Input → Sentinel → Forge/RAG → Solver Pool (3 branches) → Arbiter → Ou
 
 ## 6. 后续可优化方向
 
-1. **长推理截断**：增大 solver `max_tokens`，避免 Q3 这类题无最终答案。
-2. **更智能的检索**：当前是 TF-IDF，可升级为 embedding-based dense retrieval。
-3. **分支结果融合策略**：Arbiter 目前基于置信度简单综合，可引入证据强度加权。
-4. **calibration 优化**：模型普遍过度自信，可在 Arbiter prompt 中加入 calibration 提示。
-5. **成本监控**：增加 token 用量与 API 费用统计。
+1. **多选组合题子流程**：逐选项独立判定 + 显式排除法（Q18–Q20 全错是最大失分点）。
+2. **更智能的检索**：当前是 BM25，可升级为 embedding-based dense retrieval（跨语言召回更稳）。
+3. **数值题交叉验证**：多分支强制用不同方法独立计算，不一致时降置信度。
+4. **calibration 优化**：以分支/采样分歧度作为置信度惩罚项，按题型做校准压缩。
+5. **成本监控**：自洽采样 + Reflection 后 token 消耗明显上升，需增加用量统计。

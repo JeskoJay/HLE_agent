@@ -82,6 +82,35 @@ def _extract_answer(response: str) -> str:
     return response.strip()
 
 
+def _quasi_exact_match(model_ans: str, gold: str) -> bool:
+    """准精确匹配（GAIA 思想：P1-§8）：归一化后比较，缓解格式误判。
+    处理：小写、去空白/标点、去常见单位、选择题集合排序、数值容差近似。
+    作为 LLM judge 之外的辅助确定性指标。"""
+    if not model_ans or not gold:
+        return False
+
+    def norm(s: str) -> str:
+        s = s.strip().lower()
+        s = re.sub(r"[.,;:]", "", s)
+        s = re.sub(r"\b(km|cm|mm|kg|g|mg|hz|degrees?|radians?|bytes?|bits?|seconds?|minutes?|hours?)\b", "", s)
+        s = re.sub(r"\s+", "", s)
+        if s and all(c.isalpha() for c in s):
+            s = "".join(sorted(s))
+        return s
+
+    if norm(model_ans) == norm(gold):
+        return True
+    # 数值近似（容差 max(1e-6, 1e-3*|gold|)）
+    try:
+        fm = float(re.sub(r"[^0-9.\-eE]", "", model_ans))
+        fg = float(re.sub(r"[^0-9.\-eE]", "", gold))
+        if abs(fm - fg) <= max(1e-6, 1e-3 * abs(fg)):
+            return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
 def _parse_json_object(text: str):
     """从模型输出中抓取第一个 JSON 对象。"""
     if not text:
@@ -238,6 +267,12 @@ def dump_metrics(predictions, n_total):
     half_width = round(1.96 * math.sqrt(accuracy * (100 - accuracy) / n_total), 2) if n_total else 0.0
     cal_err = 100 * round(calib_err(confidence, correct, p="2", beta=100), 4)
 
+    qem_list = []
+    for qid, rec in predictions.items():
+        if rec.get("judge_response"):
+            qem_list.append(bool(rec.get("quasi_exact_match")))
+    qem_acc = round(100 * sum(qem_list) / n_total, 2) if n_total else 0.0
+
     return {
         "available": available,
         "n_total": n_total,
@@ -245,7 +280,87 @@ def dump_metrics(predictions, n_total):
         "accuracy_half_width": half_width,
         "calibration_error": cal_err,
         "correct_count": int(sum(correct)),
+        "quasi_exact_accuracy": qem_acc,
     }
+
+
+def layered_metrics(judged):
+    """P1-§8 分层指标：按 answer_type 报准确率 + 95% CI + 准精确匹配率。"""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for qid, rec in judged.items():
+        jr = rec.get("judge_response")
+        if not jr:
+            continue
+        at = rec.get("answer_type") or "unknown"
+        correct = "yes" in str(jr.get("correct", "")).lower()
+        qem = bool(rec.get("quasi_exact_match"))
+        groups[at].append((correct, qem))
+    rows = []
+    for at in sorted(groups):
+        items = groups[at]
+        n = len(items)
+        acc = 100 * sum(c for c, _ in items) / n if n else 0.0
+        qem_acc = 100 * sum(q for _, q in items) / n if n else 0.0
+        half = round(1.96 * math.sqrt(acc * (100 - acc) / n), 1) if n else 0.0
+        rows.append((at, n, round(acc, 1), half, round(qem_acc, 1)))
+    return rows
+
+
+def reliability_diagram(judged):
+    """P1-§8 可靠性图数据：置信度 10% 分桶 -> 桶内平均置信度 vs 实际正确率。"""
+    buckets = {b: [0, 0, 0.0] for b in range(0, 101, 10)}  # [n, correct_n, sum_conf]
+    for qid, rec in judged.items():
+        jr = rec.get("judge_response")
+        if not jr:
+            continue
+        conf = jr.get("confidence", 100)
+        b = int(conf // 10) * 10
+        buckets[b][0] += 1
+        if "yes" in str(jr.get("correct", "")).lower():
+            buckets[b][1] += 1
+        buckets[b][2] += conf
+    rows = []
+    for b in sorted(buckets):
+        n, c, sc = buckets[b]
+        if n == 0:
+            rows.append((b, 0, 0.0, 0.0))
+        else:
+            rows.append((b, n, round(sc / n, 1), round(100 * c / n, 1)))
+    return rows
+
+
+def _save_reliability_assets(outdir, judged):
+    """P1-§8：保存可靠性图数据 CSV，并尝试画 PNG（matplotlib 可用时）。"""
+    import csv
+    rows = reliability_diagram(judged)
+    csv_path = os.path.join(outdir, "reliability_diagram.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["conf_bucket_lo", "n", "avg_conf", "accuracy"])
+        for b, n, avg_conf, acc in rows:
+            w.writerow([b, n, avg_conf, acc])
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        pts = [(b, ac, a) for b, n, ac, a in rows if n]
+        xs = [p[1] for p in pts]
+        ys = [p[2] for p in pts]
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.plot([0, 100], [0, 100], "--", color="gray", label="perfect calibration")
+        ax.scatter(xs, ys, color="tab:blue", zorder=3, label="model")
+        ax.set_xlabel("Average predicted confidence (%)")
+        ax.set_ylabel("Actual accuracy (%)")
+        ax.set_title("Reliability Diagram")
+        ax.set_xlim(0, 100)
+        ax.set_ylim(0, 100)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(outdir, "reliability_diagram.png"), dpi=120)
+        plt.close(fig)
+    except Exception as e:
+        print(f"  [reliability plot] skipped (matplotlib unavailable): {e}")
 
 
 def main():
@@ -282,9 +397,11 @@ def main():
         jr = judge(question_text, gold, response_text, model_answer_hint=model_answer)
         return qid, {
             "id": qid,
+            "answer_type": rec.get("answer_type", ""),
             "question": question_text,
             "response": response_text,
             "judge_response": jr,
+            "quasi_exact_match": _quasi_exact_match(model_answer, gold),
         }
 
     with _futures.ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_REQUESTS) as ex:
@@ -304,7 +421,8 @@ def main():
     out.append("# HLE Evaluation Summary")
     out.append("")
     out.append(f"- Graded items: {metrics['available']} / {metrics['n_total']}")
-    out.append(f"- Accuracy: **{metrics['accuracy']}%** +/- {metrics['accuracy_half_width']}% (95% CI, n={metrics['n_total']})")
+    out.append(f"- Accuracy (LLM judge): **{metrics['accuracy']}%** +/- {metrics['accuracy_half_width']}% (95% CI, n={metrics['n_total']})")
+    out.append(f"- Accuracy (quasi-exact match, deterministic): **{metrics['quasi_exact_accuracy']}%**")
     out.append(f"- Calibration Error (official sorted-bucket L2, beta=100): **{metrics['calibration_error']}%**")
     out.append("")
 
@@ -326,6 +444,24 @@ def main():
         else:
             a = sum(vals) / len(vals) * 100
             out.append(f"| {b:3d}-{b+9:3d}% | {a:6.1f}%  | {len(vals)} |")
+    out.append("")
+
+    # 分层指标（P1-§8）
+    out.append("## Layered metrics (by answer_type)")
+    out.append("")
+    out.append("| answer_type | n | accuracy | 95% CI half | quasi-exact |")
+    out.append("|-------------|---|----------|-------------|------------|")
+    for at, n, acc, half, qem in layered_metrics(judged):
+        out.append(f"| {at} | {n} | {acc}% | ±{half}% | {qem}% |")
+    out.append("")
+
+    # 可靠性图（P1-§8）
+    out.append("## Reliability diagram (predicted confidence vs actual accuracy)")
+    out.append("")
+    out.append("| conf bucket | n | avg_conf | accuracy |")
+    out.append("|-------------|---|----------|----------|")
+    for b, n, avg_conf, acc in reliability_diagram(judged):
+        out.append(f"| {b:3d}-{b+9:3d}% | {n} | {avg_conf}% | {acc}% |")
     out.append("")
 
     out.append("## Per-item detail")
@@ -353,6 +489,7 @@ def main():
             f.write(report)
         with open(judge_path, "w", encoding="utf-8") as f:
             json.dump(judged, f, ensure_ascii=False, indent=2)
+        _save_reliability_assets(args.outdir, judged)
         print(f"[summary written to {summary_path}]")
         print(f"[judge results written to {judge_path}]")
 

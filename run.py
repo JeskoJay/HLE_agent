@@ -22,6 +22,7 @@ import pipeline
 def main():
     parser = argparse.ArgumentParser(description="HLE solving Agent (deepseek-v4-pro)")
     parser.add_argument("--limit", type=int, default=None, help="只处理前 N 题（调试用）")
+    parser.add_argument("--only", type=int, default=None, help="只跑第 N 题（保留原题号，调试用）")
     parser.add_argument("--concurrency", type=int, default=None,
                         help="题间并行数（默认=全部题数，即 20 题同时跑）")
     parser.add_argument("--outdir", type=str, default="outputs",
@@ -39,7 +40,8 @@ def main():
     print("=======================")
 
     pipe = pipeline.Pipeline()
-    records = pipe.run(limit=args.limit, concurrency=args.concurrency, outdir=args.outdir)
+    records = pipe.run(limit=args.limit, concurrency=args.concurrency,
+                       outdir=args.outdir, only=args.only)
     print(f"\n完成。共处理 {len(records)} 题。")
     out_file = os.path.join(args.outdir, "responses.jsonl") if args.outdir else config.OUTPUT_FILE
     rep_file = os.path.join(args.outdir, "report.md") if args.outdir else config.REPORT_FILE

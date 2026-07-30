@@ -60,6 +60,21 @@ ENABLE_TOOLS = True            # 工具调用（Python 沙箱等）
 ENABLE_ARBITER = True          # 多分支仲裁
 SOLVER_BRANCHES = ["systematic", "intuitive", "code_first"]  # 启用的 Solver 分支
 
+# ---- P0/P1 改进参数（来自 HLE_Agent框架改进建议.md §11 演进路线图）----
+# P0-§10 编排层重试：整题级指数退避重试（区别于分支内重试），失败才记 pipeline error
+MAX_PIPELINE_RETRIES = 2
+PIPELINE_RETRY_BACKOFF = 5       # 整题重试退避基数（秒）
+# P0-§6 自洽置信度：每分支采样 k 次取多数票 -> 答案；一致比例 -> 置信度（替代模型自报）
+SELF_CONSISTENCY_K = 3
+ENABLE_SELF_CONSISTENCY = True
+# P1-§1 Planner：对 non-MC 题先生成分步计划再执行（选择题跳过省 token）
+ENABLE_PLANNER = True
+# P0-§2 Reflection：Arbiter 后加 Critic + Refine 双步反思闭环
+ENABLE_REFLECTION = True
+REFLECT_MAX_ROUNDS = 1           # 反思轮数安全阀
+# P1-§3 ReAct：code_first 分支工具循环上限（Observation 含报错时提示自我修复）
+REACT_MAX_ROUNDS = 8
+
 # ---- 目录 ----
 WORKSPACE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_FILE = os.path.join(WORKSPACE, "HLE_text_only_20questions_student.jsonl")

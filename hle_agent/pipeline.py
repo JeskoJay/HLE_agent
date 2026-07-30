@@ -1,8 +1,9 @@
 """
-主流水线：Sentinel -> RAG -> Solver Pool -> Arbiter -> Exporter。
+主流水线：Sentinel -> Planner(预分析+解题计划) -> RAG(计划驱动检索) -> Solver Pool -> Arbiter -> Reflection -> Exporter。
 支持断点续跑、题间并行（--concurrency）、每题独立输出文件夹（--outdir）。
 """
 import os
+import re
 import time
 import json
 import threading
@@ -13,6 +14,8 @@ import exporter
 import sentinel
 import solver
 import arbiter
+import reflect
+import api_client
 import rag_retriever
 import stream_logger
 
@@ -24,6 +27,45 @@ def _format_rag(chunks) -> str:
     for i, (text, score, source) in enumerate(chunks, 1):
         parts.append(f"[Ref {i}] (score={score}, source={source})\n{text}")
     return "\n\n".join(parts)
+
+
+_KW_RE = re.compile(r"RETRIEVAL_KEYWORDS\s*:\s*(.+?)(?:\n|$)", re.I)
+
+
+def _make_plan(question: str, domain: str) -> dict:
+    """Planner（前置预分析）：拿到题目先分析题型/考点/陷阱，生成小的解题思路计划，
+    并输出一行检索关键词（用于驱动后续 RAG 知识检索）。
+    返回 {"plan": str, "keywords": str}；失败返回空值（不阻塞主流程）。"""
+    if not config.ENABLE_PLANNER:
+        return {"plan": "", "keywords": ""}
+    system = (
+        "You are a pre-analysis planner for a rigorous problem-solving agent "
+        "(Humanity's Last Exam). Given a problem, do the following WITHOUT solving it:\n"
+        "1. ANALYSIS: identify the problem type, the core concepts/theorems involved, "
+        "and likely traps or subtle points (2-4 short lines).\n"
+        "2. PLAN: a concise numbered step-by-step solving plan (3-6 steps), stating what "
+        "to compute/verify at each step and whether code execution would help.\n"
+        "3. RETRIEVAL_KEYWORDS: one single line of 5-12 English keywords/terms "
+        "(comma-separated) that a knowledge-base search should use to find relevant "
+        "reference material for this problem.\n\n"
+        "Output format (EXACT):\n"
+        "ANALYSIS:\n<lines>\n\nPLAN:\n<numbered steps>\n\n"
+        "RETRIEVAL_KEYWORDS: <kw1, kw2, ...>"
+    )
+    user = f"Problem domain: {domain}\n\nProblem:\n{question}"
+    try:
+        r = api_client.chat([{"role": "system", "content": system},
+                             {"role": "user", "content": user}],
+                            temperature=0.2, max_tokens=1000)
+        text = (r.get("content") or "").strip()
+        m = _KW_RE.search(text)
+        keywords = m.group(1).strip() if m else ""
+        # plan 部分 = 去掉关键词行的全文（ANALYSIS+PLAN 一起注入 Solver，信息更全）
+        plan = _KW_RE.sub("", text).strip()
+        return {"plan": plan, "keywords": keywords}
+    except Exception as e:
+        print(f"  [planner] failed: {e}")
+        return {"plan": "", "keywords": ""}
 
 
 class Pipeline:
@@ -58,37 +100,53 @@ class Pipeline:
         domain = sentinel.classify(question) if config.ENABLE_SENTINEL else "other"
         stream_logger.block("SENTINEL", "域分类结果", domain)
 
-        # 2. RAG
+        # 2. Planner 前置（预分析）：先分析题目生成解题思路计划 + 检索关键词
+        plan_info = _make_plan(question, domain)
+        plan = plan_info.get("plan", "")
+        plan_keywords = plan_info.get("keywords", "")
+        if plan:
+            stream_logger.block("PLANNER", "预分析 + 解题计划", plan)
+        if plan_keywords:
+            stream_logger.block("PLANNER", "检索关键词", plan_keywords)
+
+        # 3. RAG（计划驱动检索）：用「题目 + 计划关键词」构造 query，检索更贴合解题思路
         rag_chunks = []
         if self.retriever:
-            rag_chunks = self.retriever.retrieve(question, k=config.RAG_TOP_K)
+            rag_query = f"{question}\n{plan_keywords}" if plan_keywords else question
+            rag_chunks = self.retriever.retrieve(rag_query, k=config.RAG_TOP_K)
         rag_context = _format_rag(rag_chunks)
         if rag_chunks:
-            hits = "\n".join(f"  [{i+1}] score={s:.3f} src={src}\n  {t[:200]}"
+            hits = "\n".join(f"  [{i+1}] score={s:.3f} src={src} len={len(t)}\n  {t}"
                              for i, (t, s, src) in enumerate(rag_chunks))
-            stream_logger.block("RAG", f"检索到 {len(rag_chunks)} 条参考", hits)
+            stream_logger.block("RAG", f"检索到 {len(rag_chunks)} 条参考（计划驱动）", hits)
 
-        # 3. Solver Pool（并行执行各分支以加速）
-        branches = self._run_branches(question, domain, rag_context)
+        # 4. Solver Pool（并行执行各分支；每分支可选自洽采样；计划注入各分支 prompt）
+        branches = self._run_branches(question, domain, rag_context, plan, answer_type)
 
-        # 4. Arbiter
+        # 5. Arbiter
         arb = arbiter.arbitrate(question, domain, branches, rag_context)
+
+        # 5.5 Reflection (P0-§2): Critic + Refine 反思闭环
+        reflected = reflect.improve(question, domain, branches, arb, rag_context)
 
         # 5. 组装记录
         rec = dict(q)
-        rec["response"] = arb["response"]
-        stream_logger.block("FINAL", f"{qid} 最终答案 (conf={arb.get('final_confidence')}%)",
-                            arb["response"])
+        rec["response"] = reflected["response"]
+        stream_logger.block("FINAL", f"{qid} 最终答案 (conf={reflected.get('final_confidence')}%)",
+                            reflected["response"])
         rec["_meta"] = {
             "domain": domain,
             "rag_hits": len(rag_chunks),
+            "plan": plan,
+            "plan_keywords": plan_keywords,
             "branches": [
                 {"name": b["name"], "answer": b.get("answer"),
                  "confidence": b.get("confidence"), "tool_log": b.get("tool_log", "")}
                 for b in branches
             ],
             "arbiter_reason": arb.get("reason", ""),
-            "final_confidence": arb.get("final_confidence"),
+            "critic": reflected.get("critique", ""),
+            "final_confidence": reflected.get("final_confidence"),
             "elapsed": round(time.time() - t0, 1),
         }
         # 每题独立产出文件
@@ -99,12 +157,13 @@ class Pipeline:
                 json.dump(rec, f, ensure_ascii=False, indent=2)
         return rec
 
-    def _run_branches(self, question, domain, rag_context):
+    def _run_branches(self, question, domain, rag_context, plan, answer_type):
         """并行执行所有 Solver 分支（线程池），单分支失败不影响整体。"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         branches = []
         with ThreadPoolExecutor(max_workers=len(config.SOLVER_BRANCHES)) as ex:
-            futs = {ex.submit(solver.solve_branch, b, question, domain, rag_context): b
+            futs = {ex.submit(solver.solve_branch, b, question, domain, rag_context,
+                              plan, answer_type, config.SELF_CONSISTENCY_K): b
                     for b in config.SOLVER_BRANCHES}
             for fut in as_completed(futs):
                 try:
@@ -118,14 +177,27 @@ class Pipeline:
         return branches
 
     def _safe_one(self, q, idx, total, out_file, rep_file, outdir, rep_lock):
-        """单题执行 + 容错，写入报告条目。返回记录。"""
-        try:
-            rec = self.process_one(q, outdir=outdir, qindex=idx)
-        except Exception as e:
+        """单题执行 + 整题级容错重试（P0-§10），写入报告条目。返回记录。"""
+        last_err = None
+        rec = None
+        for attempt in range(config.MAX_PIPELINE_RETRIES + 1):
+            try:
+                rec = self.process_one(q, outdir=outdir, qindex=idx)
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < config.MAX_PIPELINE_RETRIES:
+                    backoff = config.PIPELINE_RETRY_BACKOFF * (2 ** attempt)
+                    print(f"  RETRY [{q['id']}] attempt {attempt+1}/"
+                          f"{config.MAX_PIPELINE_RETRIES}: {e} (wait {backoff}s)", flush=True)
+                    time.sleep(backoff)
+                else:
+                    print(f"  ERROR [{q['id']}] after {config.MAX_PIPELINE_RETRIES} "
+                          f"retries: {last_err}", flush=True)
+        if rec is None:
             rec = dict(q)
             rec["response"] = "Explanation: pipeline error\nAnswer: \nConfidence: 0"
-            rec["_meta"] = {"error": str(e)}
-            print(f"  ERROR [{q['id']}]: {e}")
+            rec["_meta"] = {"error": str(last_err)}
         meta = rec.get("_meta", {})
         entry = {
             "index": idx, "id": q["id"], "domain": meta.get("domain", "other"),
@@ -138,14 +210,21 @@ class Pipeline:
         with rep_lock:
             exporter.append_report(rep_file, entry)
         print(f"  [{idx}/{total}] done in {meta.get('elapsed', 0)}s, "
-              f"conf={meta.get('final_confidence')}%")
+              f"conf={meta.get('final_confidence')}%", flush=True)
         return rec
 
-    def run(self, limit=None, concurrency=1, outdir=None):
+    def run(self, limit=None, concurrency=1, outdir=None, only=None):
         questions = loader.load_questions()
-        if limit:
-            questions = questions[:limit]
-        total = len(questions)
+        n_all = len(questions)
+        if only:
+            if not (1 <= only <= n_all):
+                raise ValueError(f"--only 超出范围: {only} (共 {n_all} 题)")
+            pairs = [(only, questions[only - 1])]  # 保留原题号
+        else:
+            if limit:
+                questions = questions[:limit]
+            pairs = list(enumerate(questions, 1))
+        total = len(pairs)
         if concurrency is None:
             concurrency = total  # 默认全部题并行
 
@@ -180,26 +259,27 @@ class Pipeline:
         rep_lock = threading.Lock()
         f_lock = threading.Lock()
         records = [None] * total
+        pos_of = {idx: i for i, (idx, _) in enumerate(pairs)}  # 原题号 -> records 下标
 
         def handle(idx, q):
             if q["id"] in done_ids and q["id"] in completed_map:
-                records[idx - 1] = completed_map[q["id"]]
-                print(f"[{idx}/{total}] skip (done) {q['id']}", flush=True)
+                records[pos_of[idx]] = completed_map[q["id"]]
+                print(f"[{idx}] skip (done) {q['id']}", flush=True)
                 return
-            print(f"[{idx}/{total}] solving {q['id']} ...", flush=True)
+            print(f"[{idx}] solving {q['id']} ...", flush=True)
             rec = self._safe_one(q, idx, total, out_file, rep_file, outdir, rep_lock)
-            records[idx - 1] = rec
+            records[pos_of[idx]] = rec
             with f_lock:
                 exporter.write_all_responses([r for r in records if r is not None], out_file)
 
         if concurrency and concurrency > 1:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             with ThreadPoolExecutor(max_workers=concurrency) as ex:
-                futs = {ex.submit(handle, idx, q): idx for idx, q in enumerate(questions, 1)}
+                futs = {ex.submit(handle, idx, q): idx for idx, q in pairs}
                 for fut in as_completed(futs):
                     fut.result()  # 异常已在 handle 内吞掉
         else:
-            for idx, q in enumerate(questions, 1):
+            for idx, q in pairs:
                 handle(idx, q)
 
         final = [r for r in records if r is not None]

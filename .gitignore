@@ -31,6 +31,7 @@ reasoning_stream.log
 
 # 运行输出文件夹（每题一个子文件夹 + 汇总，不入库）
 outputs/
+outputs_*/
 
 # 本地回收站备份（删除操作的临时安全网，不入库）
 .trash_*/

@@ -1,6 +1,6 @@
 # HLE Solver Agent
 
-一个面向 **Humanity's Last Exam (HLE)** 的多智能体解题系统。项目基于 [Fieldframe Labs FF-STACK](https://fieldframe.ai) 架构理念，使用 `deepseek-v4-pro` 作为唯一推理模型，通过 **Sentinel → Forge/RAG → Solver Pool → Arbiter** 的流水线完成高难度封闭问题的求解与评分。
+一个面向 **Humanity's Last Exam (HLE)** 的多智能体解题系统。项目基于 [Fieldframe Labs FF-STACK](https://fieldframe.ai) 架构理念，使用 `deepseek-v4-pro` 作为唯一推理模型，通过 **Sentinel → Planner → RAG → Solver Pool → Arbiter → Reflection** 的流水线完成高难度封闭问题的求解与评分。
 
 ---
 
@@ -20,36 +20,34 @@
 ## 2. 系统架构
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────────────┐     ┌──────────┐
-│   Input     │────▶│   Sentinel   │────▶│   Forge + RAG Retriever │────▶│  Solver  │
-│  (20 Qs)    │     │ (题目预处理)  │     │   (知识检索/工具分发)    │     │  Pool    │
-└─────────────┘     └──────────────┘     └─────────────────────────┘     │(3分支)  │
-                                                                          └────┬─────┘
-                                                                               │
-                                                                          ┌────┴─────┐
-                                                                          │  Arbiter │
-                                                                          │(综合置信) │
-                                                                          └────┬─────┘
-                                                                               ▼
-                                                                          ┌──────────┐
-                                                                          │  Output  │
-                                                                          │response  │
-                                                                          │confidence│
-                                                                          └──────────┘
+┌─────────┐   ┌──────────┐   ┌───────────────┐   ┌──────────────┐   ┌────────────────┐
+│  Input  │──▶│ Sentinel │──▶│ Planner 预分析 │──▶│ 计划驱动 RAG  │──▶│  Solver Pool   │
+│ (20 Qs) │   │(题型识别) │   │(解题计划+关键词)│   │(BM25/整卡片)  │   │(3分支×自洽采样)│
+└─────────┘   └──────────┘   └───────────────┘   └──────────────┘   └───────┬────────┘
+                                                                            │
+              ┌──────────┐         ┌──────────────────┐              ┌──────┴───┐
+              │  Output  │◀────────│ Reflection 反思闭环│◀────────────│  Arbiter │
+              │ response │         │ (Critic + Refine) │             │(综合置信) │
+              │confidence│         └──────────────────┘              └──────────┘
+              └──────────┘
 ```
+
+**执行顺序要点**：拿到题目后**先由 Planner 做预分析**，一次调用同时产出「分步解题计划 + 检索关键词」；随后用「题干 + 计划关键词」构造检索 query 做 RAG（计划驱动检索），再进入分支求解等后续流程。
 
 ### 2.1 模块说明
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
 | **Sentinel** | `hle_agent/sentinel.py` | 读取题目，进行基础预处理与题型分发。 |
-| **Forge / RAG** | `hle_agent/rag_retriever.py` | 加载 `knowledge_base/HLE_20Q_Agent_Knowledge_Base_EN.md`，按 Markdown 章节分块，使用 TF-IDF 检索 top-K 相关片段。 |
-| **Solver Pool** | `hle_agent/solver.py` | 3 个并行的认知分支：systematic、intuitive、code_first，分别给出答案与置信度。 |
+| **Planner** | `hle_agent/pipeline.py` | **前置预分析**：生成分步解题计划 + 检索关键词，计划注入各分支 prompt，关键词驱动 RAG 检索。 |
+| **RAG Retriever** | `hle_agent/rag_retriever.py` | 加载中英双语卡片式知识库（每题一张卡），**一张卡片=一个 chunk**（不做窗口切分），BM25 打分检索 top-K。 |
+| **Solver Pool** | `hle_agent/solver.py` | 3 个并行认知分支：systematic、intuitive、code_first；每分支可自洽采样 k 次做多数投票（Self-Consistency）。code_first 分支采用 ReAct 式工具循环。 |
 | **Arbiter** | `hle_agent/arbiter.py` | 汇总 3 个分支的候选答案与置信度，输出最终 `Explanation / Answer / Confidence`。 |
+| **Reflection** | `hle_agent/reflect.py` | 反思闭环：Critic 审查三分支的事实/逻辑/数值错误，Refiner 产出修正版最终答案（非选择题启用）。 |
 | **API Client** | `hle_agent/api_client.py` | 统一封装 deepseek-v4-pro 的调用，支持 SSE 流式输出、工具调用、429/5xx 退避重试、全局并发信号量限流。 |
 | **Tools** | `hle_agent/tools.py`, `tool_registry.py` | 内置 Python 代码执行、搜索等工具，供 code_first 分支使用。 |
 | **Stream Logger** | `hle_agent/stream_logger.py` | 每题独立的 `reasoning.log`，支持 token 级实时推理日志。 |
-| **Evaluate** | `evaluate.py` | 使用 deepseek-v4-pro 作为 judge，按官方方式判定对错并计算 Accuracy / Calibration Error。 |
+| **Evaluate** | `evaluate.py` | 使用 deepseek-v4-pro 作为 judge，按官方方式判定对错并计算 Accuracy / Calibration Error；附带准精确匹配、分层统计与可靠性图。 |
 
 ---
 
@@ -63,15 +61,17 @@ HLE_agent/
 │   ├── arbiter.py             # 仲裁器：汇总多分支输出
 │   ├── config.py              # 全局配置（模型、并发、RAG top-k、超时等）
 │   ├── loader.py              # 读取 .jsonl 数据
-│   ├── pipeline.py            # 完整解题流水线 + 并行调度
-│   ├── rag_retriever.py       # 简单 TF-IDF RAG 检索器
+│   ├── pipeline.py            # 完整解题流水线（Planner 前置 + 计划驱动 RAG）+ 并行调度 + 编排级重试
+│   ├── rag_retriever.py       # BM25 检索器（卡片式知识库，一卡一 chunk）
+│   ├── reflect.py             # Reflection 反思闭环（Critic + Refine）
 │   ├── sentinel.py            # 题目预处理
-│   ├── solver.py              # 多分支 solver（systematic/intuitive/code_first）
+│   ├── solver.py              # 多分支 solver（systematic/intuitive/code_first + 自洽采样）
 │   ├── stream_logger.py       # 每题独立推理日志
 │   ├── tool_registry.py       # 工具注册表
 │   └── tools.py               # 具体工具实现
 ├── knowledge_base/
-│   └── HLE_20Q_Agent_Knowledge_Base_EN.md   # 题型知识库（K01–K17 卡片 + 20 题实例缓存）
+│   ├── HLE_20_Problem_Type_Prior_Knowledge_EN_2026-07-30.md  # 英文卡片式先验知识库（20 张卡）
+│   └── HLE_20题型先验知识库_CN.md                              # 中文卡片式先验知识库（20 张卡）
 ├── knowledge_base_README.md   # 知识库使用说明（已移出检索范围）
 ├── HLE_text_only_20questions_student.jsonl  # 20 道题目
 ├── gold_answers.json          # 20 题参考答案
@@ -130,6 +130,9 @@ python evaluate.py --outdir outputs
 # 只跑前 5 题
 python run.py --limit 5 --outdir outputs_test
 
+# 只跑第 6 题（冒烟测试单题）
+python run.py --only 6 --outdir outputs_smoke
+
 # 显式指定并发数
 python run.py --concurrency 10 --outdir outputs
 ```
@@ -147,8 +150,13 @@ python run.py --concurrency 10 --outdir outputs
 | `MAX_CONCURRENT_REQUESTS` | `10` | 全局真实并发请求上限 |
 | `MAX_RETRIES` | `4` | API 失败/限流重试次数 |
 | `RETRY_BACKOFF` | `16` | 重试退避基数（秒） |
-| `RAG_TOP_K` | `4` | 每题检索返回的知识片段数 |
+| `RAG_TOP_K` | `4` | 每题检索返回的知识卡片数 |
 | `SOLVER_BRANCHES` | `systematic`, `intuitive`, `code_first` | 三个并行认知分支 |
+| `ENABLE_PLANNER` | `True` | Planner 前置预分析（解题计划 + 检索关键词） |
+| `SELF_CONSISTENCY_K` | 见 config | 每分支自洽采样次数（多数投票） |
+| `ENABLE_REFLECTION` | `True` | Arbiter 后的 Critic+Refine 反思闭环 |
+| `MAX_PIPELINE_RETRIES` | 见 config | 单题流水线失败的编排级重试次数（指数退避） |
+| `REACT_MAX_ROUNDS` | `6` | code_first 分支 ReAct 工具循环最大轮数 |
 | `REQUEST_TIMEOUT` | `180` | 单次请求超时 |
 
 ---
@@ -200,6 +208,8 @@ python run.py --concurrency 10 --outdir outputs
 | v0.4 | 全局并发信号量 + 文件夹命名 `NN_<qid>` + `meta.json` | 防止 60+ 并发打爆代理，输出更清晰 |
 | v0.5 | 接入 `HLE_20Q_Agent_Knowledge_Base_EN.md`，检索策略 top4，章节感知的分块 | 提升 RAG 命中正确题型卡片的准确率 |
 | v0.6 | 重写 `evaluate.py` 对齐官方 HLE 评分方法 | judge 更规范，指标可对比官方 |
+| v0.7 | 官方 `hle_dataset.json` 重建 gold + 修复 judge 截断 bug | 评测结果可信（40.0% 基线） |
+| v0.8 | **Planner 前置 + 计划驱动 RAG**；Reflection 反思闭环；Self-Consistency 自洽采样；ReAct 强化；BM25 + 一卡一 chunk；编排级重试；测评增强（准精确匹配/分层统计/可靠性图） | Accuracy 40.0% → **45.0%** |
 
 ---
 
@@ -208,8 +218,8 @@ python run.py --concurrency 10 --outdir outputs
 1. **强制 thinking 模型**：`deepseek-v4-pro` 默认返回 `reasoning_content` + `content`，无法关闭 thinking。
 2. **全局限流**：即使 `--concurrency 20`，真实同时在飞的 API 请求也不会超过 `MAX_CONCURRENT_REQUESTS`（默认 10）。
 3. **断点续跑**：`run.py` 会检测 `outputs/responses.jsonl`，已完成的题默认跳过；需要干净重跑时请手动清空 `outputs/`。
-4. **gold answer 来源**：当前 `gold_answers.json` 来自项目早期整理，部分条目建议与知识库第 5 节显式答案交叉核对。
-5. **API 费用**：20 题 × 3 分支 × 多轮调用 + judge，会产生较多 token 消耗，请在额度充足时运行。
+4. **gold answer 来源**：`gold_answers.json` 由官方 `hle_dataset.json`（2500 题完整集）重建，20 题 qid 全部精确匹配，为唯一评测基准。
+5. **API 费用**：20 题 × 3 分支 × 自洽采样 × 多轮调用 + Reflection + judge，token 消耗较大，请在额度充足时运行。
 
 ---
 
@@ -222,15 +232,17 @@ python run.py --concurrency 10 --outdir outputs
 | 指标 | 数值 |
 |------|------|
 | 已评测题数 | 20 / 20 |
-| **Accuracy** | **40.0%** |
-| 95% CI 半宽 | ±21.47% |
-| **Calibration Error** | **67.53%** |
-| 正确题数 | 8 / 20（Q1, Q2, Q5, Q6, Q8, Q9, Q10, Q16） |
+| **Accuracy（LLM judge）** | **45.0%** |
+| Accuracy（准精确匹配） | 45.0% |
+| 95% CI 半宽 | ±21.8% |
+| **Calibration Error** | **66.18%** |
+| 正确题数 | 9 / 20（Q1, Q2, Q3, Q6, Q8, Q9, Q10, Q12, Q16） |
 
-主要观察：
-- 正确题涵盖密码破译（Q1）、Shamir 恢复（Q2）、数学推导（Q8）、计数（Q16）、以及多道多选题（Q5/Q6/Q9/Q10）。
-- 失败集中在：长推理截断（Q3 唯一无答案）、多选组合题（Q18–Q20）、数值/公式偏差（Q4/Q7/Q11–Q14/Q17）。
-- 模型仍**过度自信**：90–99% 置信度桶实际正确率仅 54.5%。
+与 v0.7（40.0%）对比的变化：
+- **新增答对**：Q3（此前因长推理截断无答案，本轮成功产出 `humanity`）、Q12（内存位数此前算错，本轮 `0.993:8` 全对）。
+- **回退**：Q5（多选题本轮选 H，gold 为 F）。
+- 分层：exactMatch 42.9%（6/14），multipleChoice 50.0%（3/6）。
+- 模型仍**过度自信**：90–99% 置信度桶（14 题）实际正确率 57.1%。
 - 详细分析见 `TEST_REPORT.md`。
 
-> 说明：早期 5% 结果为双重失真——既用了错误的 `gold_answers.json`，又因 judge 截断 80k response 至 4000 字符而看不到答案。本轮用官方 gold + 修复截断后，40% 才是可信基线。
+> 说明：早期 5% 结果为双重失真——既用了错误的 `gold_answers.json`，又因 judge 截断 80k response 至 4000 字符而看不到答案。v0.7 用官方 gold + 修复截断后确立 40% 基线，v0.8 架构升级后提升至 45%。
